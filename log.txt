@@ -1,0 +1,46 @@
+INFO:     Started server process [17478]
+INFO:     Waiting for application startup.
+[INFO] 2026-01-30 15:20:43,717 - main_pgvector - 应用启动中...
+[INFO] 2026-01-30 15:20:43,717 - main_pgvector - PostgreSQL 连接池初始化成功
+/Users/guijinhao/Library/Python/3.9/lib/python/site-packages/psycopg_pool/pool_async.py:148: RuntimeWarning: opening the async pool AsyncConnectionPool in the constructor is deprecated and will not be supported anymore in a future release. Please use `await pool.open()`, or use the pool as context manager using: `async with AsyncConnectionPool(...) as pool: `...
+  warnings.warn(
+[INFO] 2026-01-30 15:20:43,785 - main_pgvector - 数据库表结构初始化完成
+[INFO] 2026-01-30 15:20:43,787 - main_pgvector - 管理员用户已存在
+[INFO] 2026-01-30 15:20:43,788 - main_pgvector - 系统配置已存在
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8888 (Press CTRL+C to quit)
+INFO:     127.0.0.1:61108 - "GET /api/v1/system/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61107 - "GET /api/v1/user/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61110 - "GET /static/files/2f698a01-05ac-46e8-988f-76b15c00e330.jpg HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61107 - "GET /api/v1/system/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61108 - "GET /api/v1/system/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61116 - "GET /static/files/22984b61-5623-43af-a6ef-28716de99af5.jpg HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61118 - "GET /static/files/2d623712-da9f-46d6-8046-ef4ef31b8ee9.jpg HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61138 - "GET /api/v1/sso/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61139 - "GET /api/v1/sso/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61220 - "POST /api/v1/integrations/feishu/sync HTTP/1.1" 200 OK
+[INFO] 2026-01-30 15:22:48,125 - httpx - HTTP Request: POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal "HTTP/1.1 200 OK"
+[INFO] 2026-01-30 15:22:48,130 - main_pgvector - 开始同步知识库空间: RzdVw33YMilKDVkMQjocVeQ5nrh - 知识库 RzdVw33YMilKDVkMQjocVeQ5nrh
+[INFO] 2026-01-30 15:22:48,346 - httpx - HTTP Request: GET https://open.feishu.cn/open-apis/wiki/v2/spaces/RzdVw33YMilKDVkMQjocVeQ5nrh/nodes "HTTP/1.1 400 Bad Request"
+[ERROR] 2026-01-30 15:22:48,349 - main_pgvector - 获取节点列表失败: {'code': 131002, 'msg': 'param err: space_id is not int', 'error': {'log_id': '2026013015224872B47AB6B79424022560', 'troubleshooter': '排查建议查看(Troubleshooting suggestions): https://open.feishu.cn/search?from=openapi&log_id=2026013015224872B47AB6B79424022560&code=131002&method_id=6976461983962267649'}}
+INFO:     127.0.0.1:61238 - "GET /api/v1/integrations/feishu/sync/3db407eb-e8e1-49bf-8b19-5b774d5bd9c2 HTTP/1.1" 200 OK
+[INFO] 2026-01-30 15:22:56,951 - httpx - HTTP Request: POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal "HTTP/1.1 200 OK"
+[INFO] 2026-01-30 15:22:57,299 - httpx - HTTP Request: GET https://open.feishu.cn/open-apis/wiki/v2/spaces "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:61268 - "GET /api/v1/integrations/feishu/wiki/nodes?app_id=cli_a8bb07fa3e38500b&app_secret=yyQ8aIyBpSe4miHUhqXeHdJWyjB3XCom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61291 - "POST /api/v1/integrations/feishu/sync HTTP/1.1" 200 OK
+[INFO] 2026-01-30 15:22:59,932 - httpx - HTTP Request: POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal "HTTP/1.1 200 OK"
+[INFO] 2026-01-30 15:22:59,951 - main_pgvector - 开始同步知识库空间: RzdVw33YMilKDVkMQjocVeQ5nrh - 知识库 RzdVw33YMilKDVkMQjocVeQ5nrh
+[INFO] 2026-01-30 15:23:00,151 - httpx - HTTP Request: GET https://open.feishu.cn/open-apis/wiki/v2/spaces/RzdVw33YMilKDVkMQjocVeQ5nrh/nodes "HTTP/1.1 400 Bad Request"
+[ERROR] 2026-01-30 15:23:00,153 - main_pgvector - 获取节点列表失败: {'code': 131002, 'msg': 'param err: space_id is not int', 'error': {'log_id': '2026013015230081DECD54C4068FF562F0', 'troubleshooter': '排查建议查看(Troubleshooting suggestions): https://open.feishu.cn/search?from=openapi&log_id=2026013015230081DECD54C4068FF562F0&code=131002&method_id=6976461983962267649'}}
+INFO:     127.0.0.1:61314 - "GET /api/v1/integrations/feishu/sync/ef15bfe7-f822-4ab5-bef3-de775de243f3 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61474 - "POST /api/v1/auth/login HTTP/1.1" 200 OK
+[INFO] 2026-01-30 15:23:35,447 - httpx - HTTP Request: POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal "HTTP/1.1 200 OK"
+[INFO] 2026-01-30 15:23:35,757 - httpx - HTTP Request: GET https://open.feishu.cn/open-apis/wiki/v2/spaces "HTTP/1.1 200 OK"
+[INFO] 2026-01-30 15:23:35,957 - httpx - HTTP Request: GET https://open.feishu.cn/open-apis/wiki/v2/spaces/RzdVw33YMilKDVkMQjocVeQ5nrh/nodes "HTTP/1.1 400 Bad Request"
+[INFO] 2026-01-30 15:23:36,045 - httpx - HTTP Request: GET https://open.feishu.cn/open-apis/docx/v1/documents/lists "HTTP/1.1 400 Bad Request"
+INFO:     127.0.0.1:61476 - "GET /api/v1/integrations/feishu/debug?app_id=cli_a8bb07fa3e38500b&app_secret=yyQ8aIyBpSe4miHUhqXeHdJWyjB3XCom&space_id=RzdVw33YMilKDVkMQjocVeQ5nrh HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+[INFO] 2026-01-30 15:24:29,741 - main_pgvector - PostgreSQL 连接池已关闭
+INFO:     Application shutdown complete.
+INFO:     Finished server process [17478]
