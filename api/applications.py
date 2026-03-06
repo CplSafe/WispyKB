@@ -13,7 +13,7 @@ from typing import Dict, Optional, List
 
 from core import audit_log, audit_log_with_changes
 from fastapi import APIRouter, Depends, HTTPException, Header, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from psycopg.rows import dict_row
 
@@ -328,7 +328,7 @@ async def update_application(
                 """, values)
                 await conn.commit()
 
-    return {"message": "应用更新成功", "changes": changes}
+    return {"message": "应用更新成功", "id": app_id, "changes": changes}
 
 
 @router.get("/{app_id}/analytics")
@@ -618,7 +618,7 @@ async def public_chat(
 
                     # 转换图片 URL：使用外网地址而不是 localhost
                     import os
-                    server_host = os.getenv("SERVER_HOST", "192.168.1.61")
+                    server_host = os.getenv("SERVER_HOST", "127.0.0.1")
                     server_port = os.getenv("SERVER_PORT", "8888")
                     base_url = f"http://{server_host}:{server_port}/static/files/images"
 
@@ -830,4 +830,315 @@ async def submit_feedback(share_id: str, request: FeedbackRequest):
 
             await conn.commit()
 
+
+# ==================== Workflow 公开分享接口 ====================
+
+@share_router.get("/workflow/{workflow_id}")
+async def get_shared_workflow(
+    workflow_id: str,
+    x_share_password: Optional[str] = Header(None, alias="X-Share-Password"),
+):
+    """获取已发布工作流的公开信息（仅 is_public=true 的工作流可外部访问）"""
+    from core import config
+    pool = config.pool
+
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("""
+                SELECT id, name, description, is_published, is_public, share_password, welcome_message
+                FROM workflows WHERE id = %s AND is_published = true AND is_active = true
+            """, (workflow_id,))
+            wf = await cur.fetchone()
+
+    if not wf:
+        raise HTTPException(status_code=404, detail="工作流不存在或未发布")
+
+    if not wf.get("is_public"):
+        raise HTTPException(status_code=403, detail="该工作流仅限内部访问")
+
+    # 验证密码
+    if wf.get("share_password") and wf["share_password"] != x_share_password:
+        raise HTTPException(status_code=401, detail="密码错误")
+
+    return {
+        "id": wf["id"],
+        "name": wf["name"],
+        "description": wf.get("description"),
+        "welcome_message": wf.get("welcome_message") or "你好，请输入消息，我将通过工作流为您处理。",
+        "has_password": bool(wf.get("share_password")),
+        "type": "workflow"
+    }
+
+
+class WorkflowChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+
+@share_router.post("/workflow/{workflow_id}/chat")
+async def workflow_public_chat(
+    workflow_id: str,
+    request: WorkflowChatRequest,
+    x_share_password: Optional[str] = Header(None, alias="X-Share-Password"),
+):
+    """工作流公开对话接口 - 无需登录，将消息作为输入执行工作流"""
+    from core import config
+    import main_pgvector
+
+    pool = config.pool
+
+    # 验证工作流存在且已发布且外部可访问
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("""
+                SELECT id, name, definition, is_public, share_password
+                FROM workflows WHERE id = %s AND is_published = true AND is_active = true
+            """, (workflow_id,))
+            wf = await cur.fetchone()
+
+    if not wf:
+        raise HTTPException(status_code=404, detail="工作流不存在或未发布")
+
+    if not wf.get("is_public"):
+        raise HTTPException(status_code=403, detail="该工作流仅限内部访问")
+
+    if wf.get("share_password") and wf["share_password"] != x_share_password:
+        raise HTTPException(status_code=401, detail="密码错误")
+
+    workflow_engine = config.workflow_engine
+    if not workflow_engine:
+        raise HTTPException(status_code=500, detail="工作流引擎未初始化")
+
+    async def workflow_stream():
+        import asyncio
+        token_queue: asyncio.Queue = asyncio.Queue()
+
+        async def on_token(token: str):
+            await token_queue.put(token)
+
+        async def run_workflow():
+            try:
+                input_data = {
+                    "input": request.message,
+                    "message": request.message,
+                    "query": request.message,
+                }
+                context = await workflow_engine.execute(
+                    wf["definition"], input_data, stream_callback=on_token
+                )
+
+                # 取最终 reply（end 节点输出 或 兜底）
+                reply = None
+                definition = wf["definition"]
+                end_node = next(
+                    (n for n in definition.get('nodes', []) if n.get('type') == 'end'),
+                    None
+                )
+                if end_node:
+                    end_inputs = end_node.get('data', {}).get('inputsValues', {})
+                    for field_name, field_val in end_inputs.items():
+                        if not isinstance(field_val, dict):
+                            continue
+                        content = field_val.get('content')
+                        if field_val.get('type') == 'ref' and isinstance(content, list) and len(content) == 2:
+                            reply = context.get_variable(f"{content[0]}.{content[1]}")
+                        elif field_val.get('type') == 'template' and content:
+                            reply = context.resolve_value(content)
+                        if reply:
+                            break
+
+                if not reply:
+                    vars_dict = context.variables if hasattr(context, 'variables') else {}
+                    excluded = {"input", "message", "query"}
+                    candidates = [
+                        v for k, v in vars_dict.items()
+                        if k not in excluded and isinstance(v, str) and v
+                    ]
+                    reply = candidates[-1] if candidates else "工作流执行完成，但没有返回文本输出。"
+
+                # 如果工作流里没有 LLM 节点（没有流式 token），把最终结果补充输出
+                await token_queue.put(("__final__", str(reply)))
+            except Exception as e:
+                import traceback
+                logger.error(f"工作流执行失败: {traceback.format_exc()}")
+                await token_queue.put(("__error__", str(e)))
+
+        # 后台执行工作流
+        task = asyncio.create_task(run_workflow())
+        llm_has_output = False
+
+        while True:
+            item = await token_queue.get()
+
+            if isinstance(item, tuple):
+                kind, val = item
+                if kind == "__error__":
+                    yield f"data: {json.dumps({'content': f'执行失败：{val}'}, ensure_ascii=False)}\n\n"
+                elif kind == "__final__":
+                    # 只有 LLM 没输出过 token 时才补充最终结果
+                    if not llm_has_output:
+                        chunk_size = 10
+                        for i in range(0, len(val), chunk_size):
+                            yield f"data: {json.dumps({'content': val[i:i+chunk_size]}, ensure_ascii=False)}\n\n"
+                break
+            else:
+                # 普通 LLM token
+                llm_has_output = True
+                yield f"data: {json.dumps({'content': item}, ensure_ascii=False)}\n\n"
+
+        yield "data: [DONE]\n\n"
+        await task
+
+    return StreamingResponse(
+        workflow_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
     return {"success": True, "message": "反馈已提交"}
+
+
+# ==================== 分享页面 HTML ====================
+
+_SHARE_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{app_name} - AI 对话</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; justify-content: center; align-items: center; }}
+        .chat-container {{ width: 100%; max-width: 800px; height: 90vh; background: white; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); display: flex; flex-direction: column; overflow: hidden; margin: 20px; }}
+        .chat-header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; text-align: center; }}
+        .chat-header h1 {{ font-size: 24px; margin-bottom: 5px; }}
+        .chat-header p {{ font-size: 14px; opacity: 0.9; }}
+        .chat-messages {{ flex: 1; overflow-y: auto; padding: 20px; background: #f8f9fa; }}
+        .message {{ margin-bottom: 15px; display: flex; flex-direction: column; }}
+        .message.user {{ align-items: flex-end; }}
+        .message.assistant {{ align-items: flex-start; }}
+        .message-content {{ max-width: 80%; padding: 12px 16px; border-radius: 12px; word-wrap: break-word; }}
+        .message.user .message-content {{ background: #667eea; color: white; }}
+        .message.assistant .message-content {{ background: white; color: #333; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+        .chat-input {{ padding: 20px; background: white; border-top: 1px solid #e9ecef; display: flex; gap: 10px; }}
+        .chat-input input {{ flex: 1; padding: 12px 16px; border: 2px solid #e9ecef; border-radius: 24px; font-size: 16px; outline: none; transition: border-color 0.2s; }}
+        .chat-input input:focus {{ border-color: #667eea; }}
+        .chat-input button {{ padding: 12px 24px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 24px; cursor: pointer; font-size: 16px; font-weight: 600; }}
+        .chat-input button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+        .typing {{ display: flex; gap: 5px; padding: 12px 16px; }}
+        .typing span {{ width: 8px; height: 8px; background: #ccc; border-radius: 50%; animation: typing 1.4s infinite; }}
+        .typing span:nth-child(2) {{ animation-delay: 0.2s; }}
+        .typing span:nth-child(3) {{ animation-delay: 0.4s; }}
+        @keyframes typing {{ 0%,60%,100% {{ transform: translateY(0); }} 30% {{ transform: translateY(-10px); }} }}
+        .password-modal {{ position: fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000; }}
+        .password-modal-content {{ background: white; padding: 30px; border-radius: 16px; text-align: center; }}
+        .password-modal-content h2 {{ margin-bottom: 20px; color: #333; }}
+        .password-modal-content input {{ width: 100%; padding: 12px 16px; border: 2px solid #e9ecef; border-radius: 8px; font-size: 16px; margin-bottom: 15px; }}
+        .password-modal-content button {{ padding: 12px 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: 600; }}
+        .hidden {{ display: none !important; }}
+        @media (max-width: 768px) {{ .chat-container {{ height: 100vh; margin: 0; border-radius: 0; }} .message-content {{ max-width: 90%; }} }}
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header"><h1>{app_name}</h1><p>{app_description}</p></div>
+        <div class="chat-messages" id="messages">
+            <div class="message assistant"><div class="message-content">{welcome_message}</div></div>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="messageInput" placeholder="输入消息..." />
+            <button onclick="sendMessage()">发送</button>
+        </div>
+    </div>
+    <div class="password-modal hidden" id="passwordModal">
+        <div class="password-modal-content">
+            <h2>请输入访问密码</h2>
+            <input type="password" id="passwordInput" placeholder="密码" />
+            <button onclick="submitPassword()">确认</button>
+        </div>
+    </div>
+    <script>
+        const shareId = '{share_id}';
+        const apiUrl = '/api/v1/share/' + shareId;
+        let hasPassword = {has_password};
+        let passwordVerified = false;
+        if (hasPassword) document.getElementById('passwordModal').classList.remove('hidden');
+        function submitPassword() {{
+            const password = document.getElementById('passwordInput').value;
+            fetch(apiUrl, {{ headers: {{ 'X-Share-Password': password }} }})
+            .then(res => {{
+                if (res.ok) {{ passwordVerified = true; document.getElementById('passwordModal').classList.add('hidden'); hasPassword = false; }}
+                else alert('密码错误');
+            }});
+        }}
+        document.getElementById('messageInput').addEventListener('keypress', e => {{ if (e.key === 'Enter') sendMessage(); }});
+        function sendMessage() {{
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            if (!message) return;
+            addMessage('user', message);
+            input.value = '';
+            const loadingId = addTyping();
+            const headers = {{ 'Content-Type': 'application/json' }};
+            if (hasPassword && !passwordVerified) {{ alert('请先输入密码'); return; }}
+            if (passwordVerified) headers['X-Share-Password'] = document.getElementById('passwordInput').value;
+            fetch(apiUrl + '/chat', {{ method: 'POST', headers, body: JSON.stringify({{ message }}) }})
+            .then(r => r.json())
+            .then(data => {{ removeTyping(loadingId); if (data.reply) addMessage('assistant', data.reply); }})
+            .catch(() => {{ removeTyping(loadingId); addMessage('assistant', '抱歉，发生了一些错误，请稍后重试。'); }});
+        }}
+        function addMessage(role, content) {{
+            const div = document.getElementById('messages');
+            const el = document.createElement('div');
+            el.className = 'message ' + role;
+            el.innerHTML = '<div class="message-content">' + escapeHtml(content) + '</div>';
+            div.appendChild(el);
+            div.scrollTop = div.scrollHeight;
+        }}
+        function addTyping() {{
+            const div = document.getElementById('messages');
+            const el = document.createElement('div');
+            el.className = 'message assistant';
+            el.id = 'typing-' + Date.now();
+            el.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+            div.appendChild(el);
+            div.scrollTop = div.scrollHeight;
+            return el.id;
+        }}
+        function removeTyping(id) {{ const el = document.getElementById(id); if (el) el.remove(); }}
+        function escapeHtml(text) {{ const d = document.createElement('div'); d.textContent = text; return d.innerHTML; }}
+    </script>
+</body>
+</html>"""
+
+
+@share_router.get("/page/{share_id}", response_class=HTMLResponse)
+async def get_share_page(share_id: str):
+    """获取分享应用的 HTML 页面"""
+    import core.config as _cfg
+    pool = _cfg.pool
+    if not pool:
+        return "<h1>服务未初始化</h1>"
+
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("""
+                SELECT name, description, welcome_message, share_password
+                FROM applications WHERE share_id = %s AND is_public = true
+            """, (share_id,))
+            app_row = await cur.fetchone()
+
+    if not app_row:
+        return "<h1>分享不存在或已失效</h1>"
+
+    return _SHARE_HTML_TEMPLATE.format(
+        app_name=app_row.get('name', 'AI 助手'),
+        app_description=app_row.get('description') or '',
+        welcome_message=app_row.get('welcome_message') or '你好，我是AI助手，请问有什么可以帮你的？',
+        share_id=share_id,
+        has_password='true' if app_row.get('share_password') else 'false',
+    )

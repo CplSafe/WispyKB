@@ -260,7 +260,7 @@ async def update_knowledge_base(kb_id: str, request: UpdateKnowledgeBaseRequest,
                 await conn.commit()
 
     # 返回包含 changes 的结果，供装饰器使用
-    return {"message": "知识库更新成功", "changes": changes}
+    return {"message": "知识库更新成功", "id": kb_id, "changes": changes}
 
 
 # ==================== 搜索 API ====================

@@ -371,7 +371,7 @@ async def update_user(
 
                 await conn.commit()
 
-        return {"message": "用户更新成功", "changes": changes}
+        return {"message": "用户更新成功", "id": user_id, "changes": changes}
 
     except HTTPException:
         raise

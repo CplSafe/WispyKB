@@ -8,7 +8,7 @@
 import functools
 import logging
 from typing import Optional, Dict, List, Callable
-from fastapi import HTTPException, Depends
+from fastapi import HTTPException, Depends, Header
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +17,87 @@ _pool = None
 _has_permission_func = None
 
 
-def init_permission(pool, has_permission_func):
-    """初始化权限模块"""
+async def has_permission(user_id: str, permission: str) -> bool:
+    """检查用户是否拥有指定权限"""
+    from psycopg.rows import dict_row
+    try:
+        import core.config as _cfg
+        pool = _cfg.pool
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                # 兼容老系统：users.role == super_admin 直接通过
+                await cur.execute(
+                    "SELECT role FROM users WHERE id = %s AND deleted_at IS NULL LIMIT 1",
+                    (user_id,)
+                )
+                user = await cur.fetchone()
+                if user and user.get('role') == 'super_admin':
+                    return True
+
+                # RBAC 超级管理员角色
+                await cur.execute("""
+                    SELECT r.code FROM system_role r
+                    JOIN system_user_role ur ON r.id = ur.role_id
+                    WHERE ur.user_id = %s AND r.code = 'super_admin' AND r.deleted_at IS NULL
+                    LIMIT 1
+                """, (user_id,))
+                if await cur.fetchone():
+                    return True
+
+                # 菜单权限
+                await cur.execute("""
+                    SELECT 1 FROM system_menu m
+                    JOIN system_role_menu rm ON m.id = rm.menu_id
+                    JOIN system_user_role ur ON rm.role_id = ur.role_id
+                    WHERE ur.user_id = %s AND m.permission = %s AND m.status = 0
+                    LIMIT 1
+                """, (user_id, permission))
+                return await cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"权限检查失败: {e}")
+        return False
+
+
+async def get_user_roles(user_id: str) -> list:
+    """获取用户角色代码列表"""
+    try:
+        import core.config as _cfg
+        async with _cfg.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    SELECT r.code FROM system_role r
+                    JOIN system_user_role ur ON r.id = ur.role_id
+                    WHERE ur.user_id = %s AND r.deleted_at IS NULL AND r.status = 0
+                """, (user_id,))
+                rows = await cur.fetchall()
+                return [row[0] for row in rows] if rows else []
+    except Exception as e:
+        logger.error(f"获取用户角色失败: {e}")
+        return []
+
+
+async def get_user_departments(user_id: str) -> list:
+    """获取用户部门 ID 列表"""
+    try:
+        import core.config as _cfg
+        async with _cfg.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT dept_id FROM system_user_dept WHERE user_id = %s",
+                    (user_id,)
+                )
+                rows = await cur.fetchall()
+                return [row[0] for row in rows] if rows else []
+    except Exception as e:
+        logger.error(f"获取用户部门失败: {e}")
+        return []
+
+
+def init_permission(pool, has_permission_func=None):
+    """初始化权限模块（pool 供 PermissionChecker 使用）"""
     global _pool, _has_permission_func
     _pool = pool
-    _has_permission_func = has_permission_func
+    _has_permission_func = has_permission_func or has_permission
 
 
 # ==================== 装饰器 ====================
@@ -80,20 +156,42 @@ def require_roles(*roles: str):
 
 # ==================== 依赖项 ====================
 
-async def get_current_user_optional(authorization: Optional[str] = None) -> Optional[Dict]:
+async def get_current_user_optional(authorization: Optional[str] = Header(None)) -> Optional[Dict]:
     """
     获取当前用户（可选，不强制登录）
     用于 @permit_all 的接口
     """
-    from .dependencies import create_get_current_user
-    from . import config
-    from main_pgvector import JWT_SECRET
+    from .dependencies import decode_access_token
+    from core.config import JWT_SECRET
+    from psycopg.rows import dict_row
 
-    if not authorization:
+    if not authorization or not authorization.startswith("Bearer "):
         return None
 
-    get_user = create_get_current_user(_pool, JWT_SECRET)
-    return await get_user(authorization=authorization)
+    token = authorization[7:]
+    try:
+        payload = decode_access_token(token, JWT_SECRET)
+        user_id = payload.get("user_id")
+        if not user_id or not _pool:
+            return None
+        async with _pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT id, username, email, role, avatar FROM users WHERE id = %s AND deleted_at IS NULL",
+                    (user_id,)
+                )
+                user = await cur.fetchone()
+                if user:
+                    return {
+                        "user_id": user["id"],
+                        "username": user["username"],
+                        "email": user.get("email"),
+                        "role": user.get("role"),
+                        "avatar": user.get("avatar"),
+                    }
+    except Exception as e:
+        logger.error(f"permission.py 获取用户失败: {e}")
+    return None
 
 
 async def get_current_user_required(user: Optional[Dict] = Depends(get_current_user_optional)) -> Dict:

@@ -28,7 +28,7 @@ async def list_departments(
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(user['user_id'], 'system:dept:manage'):
         raise HTTPException(status_code=403, detail="无权限访问")
@@ -82,7 +82,7 @@ async def get_department(dept_id: str, user: Dict = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(user['user_id'], 'system:dept:manage'):
         raise HTTPException(status_code=403, detail="无权限访问")
@@ -120,7 +120,7 @@ async def get_department_users(dept_id: str, user: Dict = Depends(get_current_us
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(user['user_id'], 'system:dept:manage'):
         raise HTTPException(status_code=403, detail="无权限访问")
@@ -157,7 +157,7 @@ async def create_department(request: CreateDepartmentRequest, user: Dict = Depen
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(user['user_id'], 'system:dept:create'):
         raise HTTPException(status_code=403, detail="无权限创建部门")
@@ -205,7 +205,7 @@ async def update_department(
     if not current_user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(current_user['user_id'], 'system:dept:update'):
         raise HTTPException(status_code=403, detail="无权限更新部门")
@@ -270,7 +270,7 @@ async def update_department(
                     """, values)
                     await conn.commit()
 
-        return {"message": "部门更新成功", "changes": changes}
+        return {"message": "部门更新成功", "id": dept_id, "changes": changes}
 
     except HTTPException:
         raise
@@ -286,7 +286,7 @@ async def delete_department(dept_id: str, current_user: Dict = Depends(get_curre
     if not current_user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(current_user['user_id'], 'system:dept:delete'):
         raise HTTPException(status_code=403, detail="无权限删除部门")
@@ -331,7 +331,7 @@ async def assign_user_to_department(
     if not current_user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(current_user['user_id'], 'system:dept:update'):
         raise HTTPException(status_code=403, detail="无权限分配用户到部门")
@@ -377,7 +377,7 @@ async def remove_user_from_department(
     if not current_user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(current_user['user_id'], 'system:dept:update'):
         raise HTTPException(status_code=403, detail="无权限移除用户")

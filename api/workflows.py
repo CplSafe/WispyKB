@@ -86,11 +86,14 @@ class UpdateWorkflowRequest(BaseModel):
     description: Optional[str] = None
     icon: Optional[str] = None
     definition: Optional[Dict[str, Any]] = None
+    welcome_message: Optional[str] = None
 
 
 class PublishWorkflowRequest(BaseModel):
     """发布工作流请求"""
     description: Optional[str] = None
+    is_public: Optional[bool] = False       # True=外部可访问，False=仅内部
+    share_password: Optional[str] = None    # 外部访问密码，None=无密码
 
 
 # ==================== 辅助函数 ====================
@@ -110,7 +113,7 @@ def get_main_module():
 @router.get("/tasks/{task_id}")
 async def get_task_status(task_id: str, user: Dict = Depends(get_current_user)):
     """获取任务状态"""
-    task_queue = main_pgvector.task_queue
+    task_queue = config.task_queue
 
     task = await task_queue.get_task(task_id)
     if not task:
@@ -127,7 +130,7 @@ async def list_tasks(
     user: Dict = Depends(get_current_user)
 ):
     """列出任务"""
-    task_queue = main_pgvector.task_queue
+    task_queue = config.task_queue
 
     user_id = user.get('user_id') if user else None
     tasks = await task_queue.list_tasks(
@@ -145,7 +148,7 @@ async def list_tasks(
 async def cancel_task(task_id: str, user: Dict = Depends(get_current_user)):
     """取消/删除任务"""
     pool = config.pool
-    task_queue = main_pgvector.task_queue
+    task_queue = config.task_queue
 
     task = await task_queue.get_task(task_id)
     if not task:
@@ -318,6 +321,11 @@ async def update_workflow(
                 update_fields.append("definition = %s")
                 update_values.append(json.dumps(request.definition, ensure_ascii=False))
 
+            if request.welcome_message is not None:
+                changes['welcome_message'] = {'old': workflow.get('welcome_message'), 'new': request.welcome_message}
+                update_fields.append("welcome_message = %s")
+                update_values.append(request.welcome_message)
+
             if update_fields:
                 update_fields.append("version = version + 1")
                 update_fields.append("updated_at = NOW()")
@@ -332,6 +340,8 @@ async def update_workflow(
 
     return {
         "success": True,
+        "id": workflow_id,
+        "changes": changes,
         "data": {
             "id": workflow_id,
             "name": request.name or workflow['name'],
@@ -379,11 +389,13 @@ async def publish_workflow(
                 raise HTTPException(status_code=404, detail="工作流不存在")
 
             # 更新发布状态
+            is_public = request.is_public if request else False
+            share_password = request.share_password if request else None
             await cur.execute("""
                 UPDATE workflows
-                SET is_published = true, updated_at = NOW()
+                SET is_published = true, is_public = %s, share_password = %s, updated_at = NOW()
                 WHERE id = %s
-            """, (workflow_id,))
+            """, (is_public, share_password, workflow_id))
 
             # 创建版本快照（保存到 workflow_versions 表，如果存在的话）
             version_id = str(uuid.uuid4())
@@ -545,7 +557,7 @@ async def execute_workflow(
     user: Dict = Depends(get_current_user)
 ):
     """执行工作流"""
-    workflow_engine = main_pgvector.workflow_engine
+    workflow_engine = config.workflow_engine
 
     user_id = user.get('user_id') if user else None
 
@@ -604,7 +616,7 @@ async def pause_workflow_execution(
     user: Dict = Depends(get_current_user)
 ):
     """暂停工作流执行"""
-    workflow_engine = main_pgvector.workflow_engine
+    workflow_engine = config.workflow_engine
 
     if not workflow_engine:
         raise HTTPException(status_code=500, detail="工作流引擎未初始化")
@@ -621,7 +633,7 @@ async def resume_workflow_execution(
     user: Dict = Depends(get_current_user)
 ):
     """恢复工作流执行"""
-    workflow_engine = main_pgvector.workflow_engine
+    workflow_engine = config.workflow_engine
 
     if not workflow_engine:
         raise HTTPException(status_code=500, detail="工作流引擎未初始化")
@@ -638,7 +650,7 @@ async def submit_workflow_human_input(
     user: Dict = Depends(get_current_user)
 ):
     """提交工作流人工输入"""
-    workflow_engine = main_pgvector.workflow_engine
+    workflow_engine = config.workflow_engine
 
     if not workflow_engine:
         raise HTTPException(status_code=500, detail="工作流引擎未初始化")
@@ -654,7 +666,7 @@ async def get_workflow_execution_status(
     user: Dict = Depends(get_current_user)
 ):
     """获取工作流执行状态（轮询用）"""
-    workflow_engine = main_pgvector.workflow_engine
+    workflow_engine = config.workflow_engine
 
     if not workflow_engine:
         raise HTTPException(status_code=500, detail="工作流引擎未初始化")

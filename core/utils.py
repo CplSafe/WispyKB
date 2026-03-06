@@ -316,44 +316,44 @@ async def vector_search_multi(
 
                 logger.info(f"文档信息: {doc_info}")
 
-                if doc_info:
-                    # 计算相似度（距离转相似度）
-                    similarity = 1.0 - r.score if r.score else 0.0
+                # Milvus 返回的 score 本身就是相似度（0-1，越大越相似）
+                similarity = r.score if r.score else 0.0
 
-                    # 过滤阈值（使用相似度而不是距离）
-                    if threshold > 0 and similarity < threshold:
-                        logger.info(f"相似度 {similarity:.3f} 低于阈值 {threshold}，跳过")
-                        continue
+                # 过滤阈值（使用相似度而不是距离）
+                if threshold > 0 and similarity < threshold:
+                    logger.info(f"相似度 {similarity:.3f} 低于阈值 {threshold}，跳过")
+                    continue
 
-                    # 转换图片 URL：将 Markdown 格式改为普通文本格式，让 LLM 容易引用
-                    import re as regex_module
-                    import os
-                    # 使用服务器外网地址
-                    server_host = os.getenv("SERVER_HOST", "192.168.1.61")
-                    server_port = os.getenv("SERVER_PORT", "8888")
-                    base_url = f"http://{server_host}:{server_port}/static/files/images"
-                    content = r.content
-                    # 匹配 Markdown 图片格式 - 先匹配完整URL，再匹配相对路径
-                    content = regex_module.sub(
-                        r'!\[([^\]]*)\]\(http://localhost:\d+/static/files/images/([^)]+)\)',
-                        fr'[流程图链接: {base_url}/\2]',
-                        content
-                    )
-                    content = regex_module.sub(
-                        r'!\[([^\]]*)\]\(/static/files/images/([^)]+)\)',
-                        fr'[流程图链接: {base_url}/\2]',
-                        content
-                    )
+                # 转换图片 URL：将 Markdown 格式改为普通文本格式，让 LLM 容易引用
+                import re as regex_module
+                import os
+                # 使用服务器外网地址
+                server_host = os.getenv("SERVER_HOST", "127.0.0.1")
+                server_port = os.getenv("SERVER_PORT", "8888")
+                base_url = f"http://{server_host}:{server_port}/static/files/images"
+                content = r.content
+                # 匹配 Markdown 图片格式 - 先匹配完整URL，再匹配相对路径
+                content = regex_module.sub(
+                    r'!\[([^\]]*)\]\(http://localhost:\d+/static/files/images/([^)]+)\)',
+                    fr'[流程图链接: {base_url}/\2]',
+                    content
+                )
+                content = regex_module.sub(
+                    r'!\[([^\]]*)\]\(/static/files/images/([^)]+)\)',
+                    fr'[流程图链接: {base_url}/\2]',
+                    content
+                )
 
-                    results.append({
-                        'chunk_id': r.chunk_id,
-                        'doc_id': r.document_id,
-                        'doc_name': doc_info['doc_name'],
-                        'kb_id': doc_info['kb_id'],
-                        'kb_name': doc_info['kb_name'],
-                        'content': content,
-                        'similarity': similarity,
-                    })
+                # 即使找不到文档信息也返回内容（数据一致性问题的临时修复）
+                results.append({
+                    'chunk_id': r.chunk_id,
+                    'doc_id': r.document_id,
+                    'doc_name': doc_info['doc_name'] if doc_info else '未知文档',
+                    'kb_id': doc_info['kb_id'] if doc_info else kb_ids[0],
+                    'kb_name': doc_info['kb_name'] if doc_info else '未知知识库',
+                    'content': content,
+                    'similarity': similarity,
+                })
 
             return results
         except Exception as e:
@@ -392,7 +392,7 @@ async def vector_search_multi(
             # 转换图片 URL：将 Markdown 格式改为普通文本格式
             import re as regex_module
             import os
-            server_host = os.getenv("SERVER_HOST", "192.168.1.61")
+            server_host = os.getenv("SERVER_HOST", "127.0.0.1")
             server_port = os.getenv("SERVER_PORT", "8888")
             base_url = f"http://{server_host}:{server_port}/static/files/images"
             for r in results:

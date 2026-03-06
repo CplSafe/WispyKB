@@ -3,11 +3,12 @@
 
 import logging
 from core import config, audit_log, audit_log_with_changes
+from core.audit import write_login_log
 
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 from enum import Enum
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel
 from psycopg.rows import dict_row
 import jwt
@@ -156,17 +157,25 @@ def verify_token(token: str) -> Dict:
 # ==================== 认证 API ====================
 
 @router.post("/login")
-@audit_log(entity_type="auth", action="login", id_param="username")
-async def login(request: LoginRequest):
+async def login(request: LoginRequest, req: Request):
     """用户登录"""
     from api.dependencies import verify_password
 
-    # 直接从 core.config 获取 pool（运行时导入，确保已初始化）
     import core.config
     pool = core.config.pool
 
     if not pool:
         raise HTTPException(status_code=503, detail="数据库未初始化")
+
+    forwarded_for = req.headers.get("x-forwarded-for", "")
+    real_ip = req.headers.get("x-real-ip", "")
+    if forwarded_for:
+        ip = forwarded_for.split(",")[0].strip()
+    elif real_ip:
+        ip = real_ip.strip()
+    else:
+        ip = req.client.host if req.client else None
+    ua = req.headers.get("user-agent", "")
 
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
@@ -177,7 +186,13 @@ async def login(request: LoginRequest):
             user = await cur.fetchone()
 
     if not user or not verify_password(request.password, user['password_hash']):
+        # 记录登录失败日志
+        await write_login_log(pool, request.username, status=1,
+                              ip=ip, ua=ua, error="用户名或密码错误")
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+    # 记录登录成功日志
+    await write_login_log(pool, request.username, status=0, ip=ip, ua=ua)
 
     token = create_token(user['id'], user['username'], UserRole(user['role']))
 

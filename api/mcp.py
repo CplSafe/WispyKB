@@ -65,7 +65,7 @@ async def list_mcp_tools(
     """列出所有 MCP 工具（本地 + 远程）"""
     mcp_server = _get_globals()['mcp_server']
     if not mcp_server:
-        raise HTTPException(status_code=500, detail="MCP 服务未初始化")
+        return {'tools': [], 'count': 0}
 
     tools = await mcp_server.get_all_tools()
     return {'tools': tools, 'count': len(tools)}
@@ -97,9 +97,13 @@ async def list_mcp_configs(user: Dict = Depends(lambda: _get_globals()['get_curr
     """获取所有 MCP 服务器配置"""
     mcp_server = _get_globals()['mcp_server']
     if not mcp_server:
-        raise HTTPException(status_code=500, detail="MCP 服务未初始化")
+        return {'configs': [], 'count': 0}
 
-    configs = await mcp_server.get_remote_configs()
+    try:
+        configs = await mcp_server.get_remote_configs()
+    except Exception as e:
+        logger.error(f"获取 MCP 配置失败: {e}")
+        return {'configs': [], 'count': 0}
     return {'configs': configs, 'count': len(configs)}
 
 

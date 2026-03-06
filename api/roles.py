@@ -131,7 +131,7 @@ async def create_role(request: CreateRoleRequest, user: Dict = Depends(get_curre
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(user['user_id'], 'system:role:create'):
         raise HTTPException(status_code=403, detail="无权限创建角色")
@@ -185,7 +185,7 @@ async def update_role(
     if not current_user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(current_user['user_id'], 'system:role:update'):
         raise HTTPException(status_code=403, detail="无权限更新角色")
@@ -246,7 +246,7 @@ async def update_role(
 
                 await conn.commit()
 
-        return {"message": "角色更新成功", "changes": changes}
+        return {"message": "角色更新成功", "id": role_id, "changes": changes}
 
     except HTTPException:
         raise
@@ -262,7 +262,7 @@ async def delete_role(role_id: str, current_user: Dict = Depends(get_current_use
     if not current_user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(current_user['user_id'], 'system:role:delete'):
         raise HTTPException(status_code=403, detail="无权限删除角色")
@@ -290,7 +290,7 @@ async def get_role_users(role_id: str, user: Dict = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
 
-    from main_pgvector import has_permission
+    from api.permission import has_permission
 
     if not await has_permission(user['user_id'], 'system:role:manage'):
         raise HTTPException(status_code=403, detail="无权限访问")

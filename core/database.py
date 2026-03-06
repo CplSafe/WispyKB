@@ -407,6 +407,22 @@ async def setup_database():
                 END $$;
             """)
 
+            # 为 workflows 表添加 share_id / is_public / share_password 列（如果不存在）
+            await cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'workflows' AND column_name = 'share_id') THEN
+                        ALTER TABLE workflows ADD COLUMN share_id TEXT UNIQUE;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'workflows' AND column_name = 'is_public') THEN
+                        ALTER TABLE workflows ADD COLUMN is_public BOOLEAN DEFAULT false;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'workflows' AND column_name = 'share_password') THEN
+                        ALTER TABLE workflows ADD COLUMN share_password TEXT;
+                    END IF;
+                END $$;
+            """)
+
             # 工作流版本历史表（用于发布版本管理）
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS workflow_versions (
@@ -687,6 +703,207 @@ async def setup_database():
             except Exception as e:
                 logger.warning(f"列迁移跳过: {e}")
 
+            # ==================== RBAC 表 ====================
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_menu (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    name TEXT NOT NULL,
+                    permission TEXT,
+                    type INTEGER NOT NULL,
+                    sort INTEGER DEFAULT 0,
+                    parent_id TEXT DEFAULT '0',
+                    path TEXT,
+                    icon TEXT,
+                    component TEXT,
+                    component_name TEXT,
+                    status INTEGER DEFAULT 0,
+                    visible BOOLEAN DEFAULT true,
+                    keep_alive BOOLEAN DEFAULT false,
+                    always_show BOOLEAN DEFAULT false,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    deleted_at TIMESTAMPTZ
+                )
+            """)
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_menu_parent_id ON system_menu(parent_id) WHERE deleted_at IS NULL
+            """)
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_menu_permission ON system_menu(permission) WHERE deleted_at IS NULL
+            """)
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_role (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    name TEXT NOT NULL,
+                    code TEXT UNIQUE NOT NULL,
+                    sort INTEGER DEFAULT 0,
+                    status INTEGER DEFAULT 0,
+                    type INTEGER DEFAULT 2,
+                    data_scope INTEGER DEFAULT 1,
+                    remark TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    deleted_at TIMESTAMPTZ
+                )
+            """)
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_role_code ON system_role(code) WHERE deleted_at IS NULL
+            """)
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_user_role (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    role_id TEXT NOT NULL REFERENCES system_role(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, role_id)
+                )
+            """)
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_user_role_user_id ON system_user_role(user_id)
+            """)
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_user_role_role_id ON system_user_role(role_id)
+            """)
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_role_menu (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    role_id TEXT NOT NULL REFERENCES system_role(id) ON DELETE CASCADE,
+                    menu_id TEXT NOT NULL REFERENCES system_menu(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(role_id, menu_id)
+                )
+            """)
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_role_menu_role_id ON system_role_menu(role_id)
+            """)
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_role_menu_menu_id ON system_role_menu(menu_id)
+            """)
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_role_data_scope_dept (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    role_id TEXT NOT NULL REFERENCES system_role(id) ON DELETE CASCADE,
+                    dept_id TEXT NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(role_id, dept_id)
+                )
+            """)
+            await cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_system_role_data_scope_role_id ON system_role_data_scope_dept(role_id)
+            """)
+
+            # 用户表扩展字段（幂等）
+            try:
+                await cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS dept_id TEXT REFERENCES departments(id) ON DELETE SET NULL")
+                await cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT")
+                await cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile TEXT")
+                await cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT")
+                await cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS status INTEGER DEFAULT 0")
+                await cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
+                await cur.execute("CREATE INDEX IF NOT EXISTS idx_users_dept_id ON users(dept_id) WHERE deleted_at IS NULL")
+                await cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status) WHERE deleted_at IS NULL")
+            except Exception as e:
+                logger.warning(f"用户表字段扩展跳过: {e}")
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_post (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    code TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    sort INTEGER DEFAULT 0,
+                    status INTEGER DEFAULT 0,
+                    remark TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    deleted_at TIMESTAMPTZ
+                )
+            """)
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_user_post (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    post_id TEXT NOT NULL REFERENCES system_post(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(user_id, post_id)
+                )
+            """)
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_user_session (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token TEXT NOT NULL,
+                    ip_address TEXT,
+                    user_agent TEXT,
+                    login_at TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ NOT NULL
+                )
+            """)
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_user_session_user_id ON system_user_session(user_id)")
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_user_session_token ON system_user_session(token)")
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_user_session_expires_at ON system_user_session(expires_at)")
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_operate_log (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                    username TEXT,
+                    module TEXT,
+                    operation TEXT,
+                    request_method TEXT,
+                    request_url TEXT,
+                    request_ip TEXT,
+                    user_agent TEXT,
+                    request_params TEXT,
+                    response_data TEXT,
+                    status INTEGER DEFAULT 0,
+                    error_msg TEXT,
+                    execute_time INTEGER,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_operate_log_user_id ON system_operate_log(user_id)")
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_operate_log_created_at ON system_operate_log(created_at)")
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_login_log (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    username TEXT,
+                    status INTEGER DEFAULT 0,
+                    ip_address TEXT,
+                    user_agent TEXT,
+                    error_msg TEXT,
+                    login_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_login_log_username ON system_login_log(username)")
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_login_log_created_at ON system_login_log(login_at)")
+
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_resource_permission (
+                    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+                    resource_type TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+                    role_id TEXT REFERENCES system_role(id) ON DELETE CASCADE,
+                    dept_id TEXT REFERENCES departments(id) ON DELETE CASCADE,
+                    permissions TEXT NOT NULL,
+                    granted_by TEXT REFERENCES users(id),
+                    granted_at TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ,
+                    CHECK (user_id IS NOT NULL OR role_id IS NOT NULL OR dept_id IS NOT NULL)
+                )
+            """)
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_resource_permission_resource ON system_resource_permission(resource_type, resource_id)")
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_resource_permission_user_id ON system_resource_permission(user_id)")
+            await cur.execute("CREATE INDEX IF NOT EXISTS idx_system_resource_permission_role_id ON system_resource_permission(role_id)")
+
             await conn.commit()
 
             logger.info("数据库表结构初始化完成")
@@ -735,3 +952,99 @@ async def create_default_system_config():
                 logger.info("默认系统配置创建成功")
             else:
                 logger.info("系统配置已存在")
+
+
+async def init_rbac_default_data():
+    """初始化 RBAC 默认角色、菜单、岗位数据（幂等）"""
+    global pool
+
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            # 默认角色
+            default_roles = [
+                ('role_super_admin', '超级管理员', 'super_admin', 1, 0, 1, 1, '系统超级管理员，拥有所有权限'),
+                ('role_admin',       '管理员',     'admin',       2, 0, 1, 4, '部门管理员'),
+                ('role_member',      '普通成员',   'member',      3, 0, 1, 5, '普通用户'),
+                ('role_viewer',      '访客',       'viewer',      4, 0, 1, 5, '只读用户'),
+            ]
+            for r in default_roles:
+                await cur.execute("""
+                    INSERT INTO system_role (id, name, code, sort, status, type, data_scope, remark)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (code) DO UPDATE SET
+                        name = EXCLUDED.name, sort = EXCLUDED.sort,
+                        data_scope = EXCLUDED.data_scope, remark = EXCLUDED.remark
+                """, r)
+
+            # 默认菜单
+            default_menus = [
+                ('menu_kb',          '知识库管理', 'kb:manage',              2, 10, '0',        '/knowledge',          'DatabaseOutlined'),
+                ('menu_kb_create',   '创建知识库', 'kb:create',              3, 1,  'menu_kb',   '',                    ''),
+                ('menu_kb_update',   '编辑知识库', 'kb:update',              3, 2,  'menu_kb',   '',                    ''),
+                ('menu_kb_delete',   '删除知识库', 'kb:delete',              3, 3,  'menu_kb',   '',                    ''),
+                ('menu_kb_upload',   '上传文档',   'kb:document:upload',     3, 4,  'menu_kb',   '',                    ''),
+                ('menu_app',         'AI应用管理', 'app:manage',             2, 20, '0',        '/applications',        'AppstoreOutlined'),
+                ('menu_app_create',  '创建应用',   'app:create',             3, 1,  'menu_app',  '',                    ''),
+                ('menu_app_update',  '编辑应用',   'app:update',             3, 2,  'menu_app',  '',                    ''),
+                ('menu_app_delete',  '删除应用',   'app:delete',             3, 3,  'menu_app',  '',                    ''),
+                ('menu_user',        '用户管理',   'system:user:manage',     2, 30, '0',        '/settings/users',      'UserOutlined'),
+                ('menu_user_create', '新建用户',   'system:user:create',     3, 1,  'menu_user', '',                    ''),
+                ('menu_user_update', '编辑用户',   'system:user:update',     3, 2,  'menu_user', '',                    ''),
+                ('menu_user_delete', '删除用户',   'system:user:delete',     3, 3,  'menu_user', '',                    ''),
+                ('menu_role',        '角色管理',   'system:role:manage',     2, 31, '0',        '/settings/roles',      'TeamOutlined'),
+                ('menu_role_create', '新建角色',   'system:role:create',     3, 1,  'menu_role', '',                    ''),
+                ('menu_role_update', '编辑角色',   'system:role:update',     3, 2,  'menu_role', '',                    ''),
+                ('menu_role_delete', '删除角色',   'system:role:delete',     3, 3,  'menu_role', '',                    ''),
+                ('menu_role_assign', '分配权限',   'system:role:assign',     3, 4,  'menu_role', '',                    ''),
+                ('menu_dept',        '部门管理',   'system:dept:manage',     2, 32, '0',        '/settings/departments','ApartmentOutlined'),
+                ('menu_system',      '系统设置',   'system:config',          2, 40, '0',        '/settings/system',     'SettingOutlined'),
+                ('menu_audit',       '审计日志',   'system:audit:view',      2, 41, '0',        '/settings/audit',      'HistoryOutlined'),
+            ]
+            for m in default_menus:
+                await cur.execute("""
+                    INSERT INTO system_menu (id, name, permission, type, sort, parent_id, path, icon, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0)
+                    ON CONFLICT DO NOTHING
+                """, m)
+
+            # 超级管理员拥有所有菜单
+            await cur.execute("""
+                INSERT INTO system_role_menu (role_id, menu_id)
+                SELECT 'role_super_admin', id FROM system_menu
+                ON CONFLICT (role_id, menu_id) DO NOTHING
+            """)
+
+            # 管理员菜单
+            for mid in ('menu_kb','menu_kb_create','menu_kb_update','menu_kb_upload',
+                        'menu_app','menu_app_create','menu_app_update',
+                        'menu_user','menu_user_update','menu_dept'):
+                await cur.execute("""
+                    INSERT INTO system_role_menu (role_id, menu_id)
+                    VALUES ('role_admin', %s) ON CONFLICT DO NOTHING
+                """, (mid,))
+
+            # 普通成员菜单
+            for mid in ('menu_kb','menu_kb_upload','menu_app'):
+                await cur.execute("""
+                    INSERT INTO system_role_menu (role_id, menu_id)
+                    VALUES ('role_member', %s) ON CONFLICT DO NOTHING
+                """, (mid,))
+
+            # 默认岗位
+            default_posts = [
+                ('ceo',       'CEO',        1),
+                ('cto',       'CTO',        2),
+                ('manager',   '经理',       10),
+                ('developer', '开发工程师', 20),
+                ('tester',    '测试工程师', 30),
+                ('operator',  '运维工程师', 40),
+            ]
+            for p in default_posts:
+                await cur.execute("""
+                    INSERT INTO system_post (code, name, sort, status)
+                    VALUES (%s, %s, %s, 0)
+                    ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+                """, p)
+
+            await conn.commit()
+            logger.info("RBAC 默认数据初始化完成")

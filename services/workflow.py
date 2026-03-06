@@ -3,7 +3,7 @@
 
 import asyncio
 import logging
-from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Optional, Callable, AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum
 import json
@@ -23,35 +23,30 @@ class NodeStatus(Enum):
 
 
 class NodeType(Enum):
-    """节点类型"""
-    START = "start-node"
-    END = "end-node"
+    """节点类型 (与 FlowGram 前端保持一致)"""
+    START = "start"
+    END = "end"
+    LLM = "llm"
+    HTTP = "http"
+    CODE = "code"
+    VARIABLE = "variable"
+    CONDITION = "condition"
+    LOOP = "loop"
+    BLOCK_START = "block-start"
+    BLOCK_END = "block-end"
+    KNOWLEDGE_BASE = "knowledge-base"
+    MCP_SERVICE = "mcp-service"
+    WORKFLOW_APP = "workflow-app"
+    CONTINUE = "continue"
+    BREAK = "break"
+    # 兼容旧版节点类型
     AI_CHAT = "ai-chat-node"
-    CONDITION = "condition-node"
-    LOOP = "loop-node"
     SEARCH_KNOWLEDGE = "search-knowledge-node"
     KNOWLEDGE_WRITE = "knowledge-write-node"
-    DATA_SOURCE_LOCAL = "data-source-local-node"
-    DATA_SOURCE_WEB = "data-source-web-node"
-    DOCUMENT_EXTRACT = "document-extract-node"
-    DOCUMENT_SPLIT = "document-split-node"
-    FORM = "form-node"
-    QUESTION = "question-node"
     REPLY = "reply-node"
     VARIABLE_ASSIGN = "variable-assign-node"
-    VARIABLE_SPLIT = "variable-splitting"
-    VARIABLE_AGGREGATION = "variable-aggregation-node"
-    PARAMETER_EXTRACTION = "parameter-extraction-node"
     TOOL = "tool-node"
     MCP = "mcp-node"
-    INTENT_CLASSIFY = "intent-classify-node"
-    RERANKER = "reranker-node"
-    IMAGE_GENERATE = "image-generate-node"
-    IMAGE_UNDERSTAND = "image-understand-node"
-    SPEECH_TO_TEXT = "speech-to-text-node"
-    TEXT_TO_SPEECH = "text-to-speech-node"
-    APPLICATION = "application-node"
-    LOOP_BREAK = "loop-break-node"
     LOOP_CONTINUE = "loop-continue-node"
 
 
@@ -73,6 +68,8 @@ class WorkflowContext:
     current_node_id: Optional[str] = None
     execution_path: List[str] = field(default_factory=list)
     loop_stack: List[Dict[str, Any]] = field(default_factory=list)
+    # LLM 节点流式 token 回调：async (token: str) -> None
+    stream_callback: Optional[Callable] = field(default=None, compare=False)
 
     def set_variable(self, key: str, value: Any):
         """设置变量"""
@@ -81,7 +78,11 @@ class WorkflowContext:
 
     def get_variable(self, key: str, default: Any = None) -> Any:
         """获取变量"""
-        # 支持嵌套访问，如 user.name
+        # 优先查找完整 key（如 start_0.query）
+        if key in self.variables:
+            return self.variables[key]
+
+        # 否则尝试嵌套访问（如 user.name）
         keys = key.split('.')
         value = self.variables
         for k in keys:
@@ -92,14 +93,42 @@ class WorkflowContext:
         return value if value is not None else default
 
     def resolve_value(self, value: Any) -> Any:
-        """解析值中的变量引用，如 {{variable_name}}"""
-        if isinstance(value, str):
-            # 简单的变量替换
-            if value.startswith('{{') and value.endswith('}}'):
-                var_name = value[2:-2].strip()
-                return self.get_variable(var_name)
+        """解析值中的变量引用，如 {{variable_name}} 或 {{nodeId.field}}"""
+        if not isinstance(value, str):
             return value
-        return value
+        import re
+        # 整体是一个变量引用，直接返回原始类型
+        single = re.fullmatch(r'\{\{(.+?)\}\}', value.strip())
+        if single:
+            return self.get_variable(single.group(1).strip())
+        # 含多个或嵌入文本的模板，做字符串替换
+        def replace_var(m):
+            v = self.get_variable(m.group(1).strip())
+            return str(v) if v is not None else m.group(0)
+        return re.sub(r'\{\{(.+?)\}\}', replace_var, value)
+
+    def resolve_inputs_values(self, inputs_values: Dict[str, Any]) -> Dict[str, Any]:
+        """解析 FlowGram inputsValues 结构，返回实际值字典"""
+        result = {}
+        for field_name, field_val in inputs_values.items():
+            if not isinstance(field_val, dict):
+                result[field_name] = field_val
+                continue
+            val_type = field_val.get('type', 'constant')
+            content = field_val.get('content', '')
+            if val_type == 'constant':
+                result[field_name] = content
+            elif val_type in ('template', 'expression'):
+                result[field_name] = self.resolve_value(content)
+            elif val_type == 'ref':
+                # ref: content 是 [nodeId, fieldName] 列表
+                if isinstance(content, list) and len(content) == 2:
+                    result[field_name] = self.get_variable(f"{content[0]}.{content[1]}")
+                else:
+                    result[field_name] = self.resolve_value(str(content))
+            else:
+                result[field_name] = content
+        return result
 
 
 class BaseNode:
@@ -163,73 +192,136 @@ class BaseNode:
         raise NotImplementedError(f"_execute not implemented for {self.node_type}")
 
 
+class EndNode(BaseNode):
+    """结束节点"""
+
+    async def _execute(self, context: WorkflowContext) -> Dict[str, Any]:
+        # 解析 end 节点的 inputsValues，把最终输出写入 context 供外部读取
+        inputs_values = self.properties.get('inputsValues', {})
+        resolved = context.resolve_inputs_values(inputs_values)
+        for field_name, val in resolved.items():
+            context.set_variable(f"{self.node_id}.{field_name}", val)
+        return resolved
+
+
 class StartNode(BaseNode):
     """开始节点"""
 
     async def _execute(self, context: WorkflowContext) -> Dict[str, Any]:
-        # 初始化变量
+        # 把 start 节点的 outputs 字段从 context.variables 映射到 nodeId.field 格式
+        # 这样下游节点可以用 {{start_0.query}} 引用
+        outputs_schema = self.properties.get('outputs', {})
+        output_fields = list(outputs_schema.get('properties', {}).keys())
+        for field_name in output_fields:
+            # 从 context 里取同名变量（由调用方写入，如 query/message/input）
+            val = context.get_variable(field_name)
+            if val is not None:
+                context.set_variable(f"{self.node_id}.{field_name}", val)
         return {"message": "Workflow started"}
 
 
 class AIChatNode(BaseNode):
-    """AI对话节点"""
+    """AI对话节点（兼容 FlowGram inputsValues 结构）"""
 
     async def _execute(self, context: WorkflowContext) -> Dict[str, Any]:
-        from core.config import get_ollama_base_url
+        from core.config import OLLAMA_BASE_URL
 
-        prompt = context.resolve_value(self.properties.get('prompt', ''))
-        model = self.properties.get('model', 'deepseek-r1:8b')
-        temperature = self.properties.get('temperature', 0.7)
+        # 解析 FlowGram inputsValues 结构
+        inputs_values = self.properties.get('inputsValues', {})
+        resolved = context.resolve_inputs_values(inputs_values)
+
+        prompt = resolved.get('prompt', self.properties.get('prompt', ''))
+        system_prompt = resolved.get('systemPrompt', self.properties.get('systemPrompt', ''))
+        model = resolved.get('modelName', self.properties.get('model', 'deepseek-r1:8b'))
+        temperature = resolved.get('temperature', self.properties.get('temperature', 0.7))
         max_tokens = self.properties.get('max_tokens', 2048)
+        api_host = resolved.get('apiHost', '')
 
-        # 替换提示词中的变量
-        if isinstance(prompt, str):
-            for key, value in context.variables.items():
-                prompt = prompt.replace(f'{{{{{key}}}}}', str(value))
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": str(system_prompt)})
+        messages.append({"role": "user", "content": str(prompt)})
 
-        # 调用 Ollama API
-        base_url = get_ollama_base_url()
+        # 优先用节点配置的 apiHost，否则用全局 Ollama 地址
+        base_url = OLLAMA_BASE_URL
+        if api_host:
+            # apiHost 可能是 OpenAI 兼容地址，去掉 /v1 后缀用原生 Ollama
+            base_url = api_host.rstrip('/').removesuffix('/v1') or base_url
+
+        ai_response = ""
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
+            async with client.stream(
+                "POST",
                 f"{base_url}/api/chat",
                 json={
                     "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
+                    "messages": messages,
+                    "stream": True,
                     "options": {
                         "num_ctx": 8192,
-                        "temperature": temperature,
+                        "temperature": float(temperature),
                         "num_predict": max_tokens,
                     }
                 }
-            )
-            response.raise_for_status()
-            data = response.json()
-            ai_response = data.get("message", {}).get("content", "")
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                        token = data.get("message", {}).get("content", "")
+                        if token:
+                            import re as _re
+                            # 移除 <think> 标签，但保留换行符（不使用 strip）
+                            token = _re.sub(r'<think>.*?</think>', '', token, flags=_re.DOTALL)
+                            if token:
+                                ai_response += token
+                                if context.stream_callback:
+                                    await context.stream_callback(token)
+                        if data.get("done"):
+                            break
+                    except json.JSONDecodeError:
+                        continue
 
-        output_variable = self.properties.get('output_variable', 'ai_response')
-        context.set_variable(output_variable, ai_response)
+        # 按 FlowGram outputs schema 定义的字段名存变量（通常是 result）
+        outputs_schema = self.properties.get('outputs', {})
+        output_fields = list(outputs_schema.get('properties', {}).keys())
+        primary_field = output_fields[0] if output_fields else 'result'
+        context.set_variable(f"{self.node_id}.{primary_field}", ai_response)
+        # 兼容旧逻辑
+        context.set_variable('ai_response', ai_response)
 
-        return {"response": ai_response}
+        return {primary_field: ai_response}
 
 
 class SearchKnowledgeNode(BaseNode):
-    """知识库检索节点"""
+    """知识库检索节点（兼容 FlowGram inputsValues 结构）"""
 
     async def _execute(self, context: WorkflowContext) -> Dict[str, Any]:
         from core.utils import vector_search_multi
         from services.embedding import EmbeddingService
-        from core.config import get_ollama_base_url
+        from core.config import OLLAMA_BASE_URL, OLLAMA_EMBEDDING_MODEL
 
-        query = context.resolve_value(self.properties.get('query', ''))
-        knowledge_base_id = self.properties.get('knowledge_base_id')
-        top_k = self.properties.get('top_k', 3)
-        similarity_threshold = self.properties.get('similarity_threshold', 0.5)
-        output_variable = self.properties.get('output_variable', 'search_results')
+        # 解析 FlowGram inputsValues 结构
+        inputs_values = self.properties.get('inputsValues', {})
+        logger.info(f"[KB Node] inputsValues: {inputs_values}")
+        logger.info(f"[KB Node] context.variables: {context.variables}")
+
+        resolved = context.resolve_inputs_values(inputs_values)
+        logger.info(f"[KB Node] resolved: {resolved}")
+
+        query = resolved.get('query', '')
+        knowledge_base_id = resolved.get('knowledgeBaseId', '')
+        top_k = resolved.get('topK', 5)
+
+        if not query:
+            raise ValueError(f"query 字段不能为空 (resolved={resolved})")
+        if not knowledge_base_id:
+            raise ValueError("knowledgeBaseId 字段不能为空")
 
         # 生成查询向量
-        embedding_model = 'nomic-embed-text'
-        embedding_service = EmbeddingService(embedding_model, get_ollama_base_url())
+        embedding_service = EmbeddingService(OLLAMA_EMBEDDING_MODEL, OLLAMA_BASE_URL)
         query_embedding = await embedding_service.generate(query)
 
         if not query_embedding:
@@ -240,14 +332,18 @@ class SearchKnowledgeNode(BaseNode):
         results = await vector_search_multi(
             pool_ref=config.pool,
             query_embedding=query_embedding,
-            kb_ids=[knowledge_base_id] if knowledge_base_id else [],
+            kb_ids=[knowledge_base_id],
             top_k=top_k,
-            threshold=similarity_threshold
+            threshold=0.5
         )
 
-        context.set_variable(output_variable, results)
+        # 按 FlowGram outputs schema 定义的字段名存变量
+        outputs_schema = self.properties.get('outputs', {})
+        output_fields = list(outputs_schema.get('properties', {}).keys())
+        primary_field = output_fields[0] if output_fields else 'results'
+        context.set_variable(f"{self.node_id}.{primary_field}", results)
 
-        return {"results": results, "count": len(results)}
+        return {primary_field: results, "count": len(results)}
 
 
 class ConditionNode(BaseNode):
@@ -425,11 +521,18 @@ class WorkflowEngine:
         self.pool = pool
         self.cache = cache
         self.node_classes: Dict[str, type[BaseNode]] = {
+            # FlowGram 前端节点类型
             NodeType.START.value: StartNode,
-            NodeType.AI_CHAT.value: AIChatNode,
-            NodeType.SEARCH_KNOWLEDGE.value: SearchKnowledgeNode,
+            NodeType.END.value: EndNode,
+            NodeType.LLM.value: AIChatNode,
+            NodeType.KNOWLEDGE_BASE.value: SearchKnowledgeNode,
             NodeType.CONDITION.value: ConditionNode,
             NodeType.LOOP.value: LoopNode,
+            NodeType.VARIABLE.value: VariableAssignNode,
+            NodeType.MCP_SERVICE.value: ToolNode,
+            # 兼容旧版节点类型
+            NodeType.AI_CHAT.value: AIChatNode,
+            NodeType.SEARCH_KNOWLEDGE.value: SearchKnowledgeNode,
             NodeType.VARIABLE_ASSIGN.value: VariableAssignNode,
             NodeType.REPLY.value: ReplyNode,
             NodeType.TOOL.value: ToolNode,
@@ -441,20 +544,46 @@ class WorkflowEngine:
 
     async def execute(
         self,
-        workflow_definition: Dict[str, Any],
-        input_data: Dict[str, Any] = None
+        workflow_id_or_definition,  # Union[str, Dict[str, Any]]
+        input_data: Dict[str, Any] = None,
+        user_id: Optional[str] = None,
+        stream_callback: Optional[Callable] = None,
     ) -> WorkflowContext:
         """
         执行工作流
 
         Args:
-            workflow_definition: 工作流定义
+            workflow_id_or_definition: 工作流 ID（字符串）或工作流定义（字典）
             input_data: 输入数据
+            user_id: 用户 ID（未使用，保留参数兼容性）
+            stream_callback: LLM 节点流式 token 回调 async (token: str) -> None
 
         Returns:
             工作流执行上下文（包含所有变量和结果）
         """
+        # 如果传入的是 workflow_id，从数据库加载定义
+        if isinstance(workflow_id_or_definition, str):
+            if not self.pool:
+                raise ValueError("Database pool not initialized")
+
+            from psycopg.rows import dict_row
+            async with self.pool.connection() as conn:
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(
+                        "SELECT definition FROM workflows WHERE id = %s",
+                        (workflow_id_or_definition,)
+                    )
+                    row = await cur.fetchone()
+
+                    if not row:
+                        raise ValueError(f"Workflow {workflow_id_or_definition} not found")
+
+                    workflow_definition = row['definition']
+        else:
+            workflow_definition = workflow_id_or_definition
+
         context = WorkflowContext()
+        context.stream_callback = stream_callback
 
         # 设置输入数据
         if input_data:
@@ -468,22 +597,26 @@ class WorkflowEngine:
         # 构建节点图
         node_map = {}
         for node_data in nodes:
-            node_class = self.node_classes.get(
-                node_data['type'],
-                lambda nid, nt, props: BaseNode(nid, nt, props)
-            )
+            node_type = node_data['type']
+            node_class = self.node_classes.get(node_type)
+
+            if node_class is None:
+                logger.error(f"No executor found for node type: {node_type}")
+                logger.error(f"Available node types: {list(self.node_classes.keys())}")
+                raise ValueError(f"No executor found for node type: {node_type}")
+
             node_map[node_data['id']] = node_class(
                 node_data['id'],
-                node_data['type'],
-                node_data.get('properties', {})
+                node_type,
+                node_data.get('data') or node_data.get('properties', {})
             )
 
         # 构建邻接表
         adjacency = {node_id: [] for node_id in node_map}
         edge_map = {}
         for edge in edges:
-            source = edge['sourceNodeId']
-            target = edge['targetNodeId']
+            source = edge.get('sourceNodeID') or edge.get('sourceNodeId')
+            target = edge.get('targetNodeID') or edge.get('targetNodeId')
             adjacency[source].append(target)
             edge_map[(source, target)] = edge
 
@@ -561,7 +694,8 @@ workflow_engine = WorkflowEngine()
 
 async def execute_workflow(
     workflow_definition: Dict[str, Any],
-    input_data: Dict[str, Any] = None
+    input_data: Dict[str, Any] = None,
+    stream_callback: Optional[Callable] = None,
 ) -> WorkflowContext:
     """
     执行工作流（便捷函数）
@@ -569,8 +703,9 @@ async def execute_workflow(
     Args:
         workflow_definition: 工作流定义
         input_data: 输入数据
+        stream_callback: LLM 节点流式 token 回调
 
     Returns:
         工作流执行上下文
     """
-    return await workflow_engine.execute(workflow_definition, input_data)
+    return await workflow_engine.execute(workflow_definition, input_data, stream_callback)

@@ -45,13 +45,23 @@ class DocumentProcessor:
         'application/pdf': '.pdf',
     }
 
-    def __init__(self, html2text_available=False, bs4_available=False,
-                 docx_available=False, pptx_available=False, xlsx_available=False):
-        self.html2text_available = html2text_available
-        self.bs4_available = bs4_available
-        self.docx_available = docx_available
-        self.pptx_available = pptx_available
-        self.xlsx_available = xlsx_available
+    def __init__(self, html2text_available=None, bs4_available=None,
+                 docx_available=None, pptx_available=None, xlsx_available=None):
+        # 若未显式传入，则自动探测
+        def _check(flag, module_name):
+            if flag is not None:
+                return flag
+            try:
+                __import__(module_name)
+                return True
+            except ImportError:
+                return False
+
+        self.html2text_available = _check(html2text_available, 'html2text')
+        self.bs4_available       = _check(bs4_available,       'bs4')
+        self.docx_available      = _check(docx_available,      'docx')
+        self.pptx_available      = _check(pptx_available,      'pptx')
+        self.xlsx_available      = _check(xlsx_available,      'openpyxl')
 
         self.html_converter = None
         if self.html2text_available:
