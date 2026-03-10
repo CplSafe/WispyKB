@@ -197,6 +197,28 @@ MILVUS_CONFIG = {
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8888")
 STATIC_URL = f"{BACKEND_URL}/static/files"
 
+# ==================== CORS 配置 ====================
+
+# CORS 允许的源（JSON 数组格式）
+# 生产环境必须设置具体的域名，不能使用 "*"
+# 示例: '["https://example.com", "https://www.example.com"]'
+CORS_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    '["http://localhost:3000", "http://localhost:8000"]'
+)
+
+# ==================== 安全配置 ====================
+
+# 环境类型: development, staging, production
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+
+# DEBUG 模式（生产环境必须设置为 false）
+DEBUG = os.getenv("DEBUG", "true").lower() == "true"
+
+# 允许的 IP 白名单（可选，用于政府服务器）
+# 格式: JSON 数组，如 '["192.168.1.100", "10.0.0.0/8"]'
+ALLOWED_IPS = os.getenv("ALLOWED_IPS", "[]")
+
 # ==================== API 限流配置 ====================
 
 RATE_LIMIT = {

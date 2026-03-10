@@ -141,12 +141,37 @@ app.include_router(feishu_router)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static/files", StaticFiles(directory=str(UPLOAD_DIR)), name="files")
 
-# CORS 中间件
+# CORS 中间件 - 安全配置
+import os
+from core.config import CORS_ORIGINS
+
+# 从环境变量读取 CORS 配置，如果未设置则使用开发默认值
+cors_origins_config = os.getenv("CORS_ORIGINS", '["http://localhost:3000", "http://localhost:8000"]')
+
+try:
+    import json
+    cors_origins = json.loads(cors_origins_config)
+
+    # 生产环境安全检查：如果配置了通配符，记录警告
+    environment = os.getenv("ENVIRONMENT", "development")
+    if environment == "production" and "*" in cors_origins:
+        logger.error("🚨 严重安全问题: CORS 配置包含通配符 '*'，生产环境不允许！")
+        logger.error("请通过环境变量 CORS_ORIGINS 设置具体的域名白名单")
+        # 在生产环境中，如果配置了通配符，回退到空列表（拒绝所有请求）
+        cors_origins = []
+
+    logger.info(f"CORS 配置: {cors_origins}")
+
+except json.JSONDecodeError as e:
+    logger.error(f"CORS_ORIGINS 配置格式错误: {e}")
+    logger.error("使用默认值: ['http://localhost:3000', 'http://localhost:8000']")
+    cors_origins = ["http://localhost:3000", "http://localhost:8000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 
