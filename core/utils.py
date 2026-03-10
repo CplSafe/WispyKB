@@ -162,7 +162,78 @@ def validate_pagination(page: int, page_size: int, max_page_size: int = 100) -> 
     return page, page_size
 
 
-# ==================== Ollama API 调用 ====================
+# ==================== LLM 服务调用（统一接口）====================
+
+async def call_llm(
+    model: str,
+    messages: List[Dict],
+    stream: bool = False,
+    temperature: float = 0.1,
+    top_p: float = 0.9,
+    num_predict: int = 2048,
+    llm_engine: str = None
+):
+    """调用 LLM 模型（统一接口，支持 Ollama 和 vLLM）
+
+    Args:
+        model: 模型名称
+        messages: 消息列表
+        stream: 是否使用流式输出
+        temperature: 温度参数，0-1，越低越严格（默认0.1，适合RAG）
+        top_p: nucleus sampling 参数（默认0.9）
+        num_predict: 最大生成 token 数（默认2048）
+        llm_engine: 指定 LLM 引擎 ("ollama", "vllm", None 表示自动选择)
+
+    Returns:
+        如果 stream=False，返回字符串
+        如果 stream=True，返回异步生成器
+    """
+    from .config import LLM_ENGINE, VLLM_ENABLED, VLLM_BASE_URL, VLLM_CHAT_MODEL
+
+    # 确定 LLM 引擎
+    engine = llm_engine or LLM_ENGINE
+
+    # 如果配置了 vLLM 且启用，优先使用 vLLM
+    if engine == "vllm" or (engine == "auto" and VLLM_ENABLED):
+        from services.llm import LLMService
+        llm_service = LLMService(
+            provider="vllm",
+            base_url=VLLM_BASE_URL,
+            model=model or VLLM_CHAT_MODEL
+        )
+
+        if stream:
+            async def generate_stream():
+                async for token in llm_service.chat_stream(
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=num_predict
+                ):
+                    # 移除思考模式标签（如果存在）
+                    token = re.sub(r'＜think＞.*?＜/think＞', '', token, flags=re.DOTALL)
+                    if token:
+                        yield f"data: {json.dumps({'content': token}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return generate_stream()
+        else:
+            content = await llm_service.chat(
+                messages=messages,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=num_predict
+            )
+            # 移除思考模式标签
+            content = re.sub(r'＜think＞.*?＜/think＞', '', content, flags=re.DOTALL)
+            return content
+
+    # 默认使用 Ollama
+    else:
+        return await call_ollama(model, messages, stream, temperature, top_p, num_predict)
+
+
+# ==================== Ollama API 调用（保留向后兼容）====================
 
 async def call_ollama(
     model: str,

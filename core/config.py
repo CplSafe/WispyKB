@@ -19,6 +19,17 @@ OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
 OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "qwen2.5:7b")
 RERANK_MODEL = os.getenv("RERANK_MODEL", "bge-reranker-v2-m3")
 
+# ==================== vLLM 配置 ====================
+
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
+VLLM_CHAT_MODEL = os.getenv("VLLM_CHAT_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+VLLM_ENABLED = os.getenv("VLLM_ENABLED", "false").lower() == "true"
+
+# ==================== LLM 引擎选择 ====================
+
+# 可选值: "ollama", "vllm", "auto"（自动选择，优先 vLLM）
+LLM_ENGINE = os.getenv("LLM_ENGINE", "ollama")
+
 # ==================== 模型配置 ====================
 
 # 支持的 Embedding 模型列表（按中文优化程度排序）
