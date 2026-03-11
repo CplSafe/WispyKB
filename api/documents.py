@@ -207,11 +207,12 @@ async def _process_document_with_task(task_id: str, doc_id: str, kb_id: str, fil
 
     logger.info(f"开始处理文档: doc_id={doc_id}, task_queue={task_queue is not None}, document_processor={document_processor is not None}")
 
-    try:
-        # 更新任务状态为处理中
+    # 进度回调函数 - 将文档处理进度同步到任务队列
+    async def on_progress(progress: float, message: str):
         if task_queue:
-            await task_queue.update_progress(task_id, 10, "processing")
+            await task_queue.update_progress(task_id, int(progress), message)
 
+    try:
         # 处理文档
         if document_processor:
             result = await document_processor.process(
@@ -225,19 +226,17 @@ async def _process_document_with_task(task_id: str, doc_id: str, kb_id: str, fil
                 chunk_overlap=kb.get('chunk_overlap', 50),
                 incremental=True,
                 vector_store_type=VECTOR_STORE_TYPE,
-                vector_store_instance=vector_store_instance
+                vector_store_instance=vector_store_instance,
+                on_progress=on_progress
             )
 
-            # 更新进度
-            if task_queue:
-                await task_queue.update_progress(task_id, 90, "processing")
-
             # 标记任务完成
-            await task_queue.complete_task(task_id, {
-                "doc_id": doc_id,
-                "chunks_count": result.get('chunks_count', 0),
-                "tokens_count": result.get('tokens_count', 0)
-            })
+            if task_queue:
+                await task_queue.complete_task(task_id, {
+                    "doc_id": doc_id,
+                    "chunks_count": result.get('chunk_count', 0),
+                    "tokens_count": result.get('tokens_count', 0)
+                })
 
             logger.info(f"文档处理完成: {doc_id}, 任务: {task_id}")
 
@@ -259,7 +258,7 @@ async def _process_document_with_task(task_id: str, doc_id: str, kb_id: str, fil
 
 
 async def _process_document_background(doc_id: str, kb_id: str, file_path: str, filename: str, kb: Dict):
-    """后台处理文档"""
+    """后台处理文档（无任务队列跟踪）"""
 
     pool = config.pool
     document_processor = getattr(get_main_module(), 'document_processor', None)
@@ -280,7 +279,8 @@ async def _process_document_background(doc_id: str, kb_id: str, file_path: str, 
                 chunk_overlap=kb.get('chunk_overlap', 50),
                 incremental=True,
                 vector_store_type=VECTOR_STORE_TYPE,
-                vector_store_instance=vector_store_instance
+                vector_store_instance=vector_store_instance,
+                on_progress=None  # 后台处理无任务队列，不报告进度
             )
             logger.info(f"文档处理完成: {doc_id}, 结果: {result}")
     except Exception as e:

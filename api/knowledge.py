@@ -25,7 +25,7 @@ class CreateKnowledgeBaseRequest(BaseModel):
     """创建知识库请求"""
     name: str
     description: Optional[str] = None
-    embedding_model: Optional[str] = "nomic-embed-text"
+    embedding_model: Optional[str] = None
     chunk_size: Optional[int] = 512
     chunk_overlap: Optional[int] = 50
 
@@ -122,7 +122,8 @@ async def list_knowledge_bases(user: Dict = Depends(get_current_user)):
                        kb.created_at,
                        kb.updated_at,
                        COALESCE(doc_counts.doc_count, 0) as doc_count,
-                       COALESCE(doc_counts.token_count, 0) as token_count
+                       COALESCE(doc_counts.token_count, 0) as token_count,
+                       COALESCE(proc_counts.processing_count, 0) as processing_count
                 FROM knowledge_bases kb
                 LEFT JOIN users u ON kb.owner_id = u.id
                 LEFT JOIN (
@@ -133,6 +134,13 @@ async def list_knowledge_bases(user: Dict = Depends(get_current_user)):
                     WHERE status = 'completed'
                     GROUP BY kb_id
                 ) doc_counts ON kb.id = doc_counts.kb_id
+                LEFT JOIN (
+                    SELECT kb_id,
+                           COUNT(*) as processing_count
+                    FROM documents
+                    WHERE status = 'processing'
+                    GROUP BY kb_id
+                ) proc_counts ON kb.id = proc_counts.kb_id
                 {where_clause}
                 ORDER BY kb.created_at DESC
             """, params)
@@ -175,6 +183,77 @@ async def get_knowledge_base(kb_id: str, user: Dict = Depends(get_current_user))
     return row
 
 
+@router.get("/{kb_id}/processing-progress")
+async def get_kb_processing_progress(kb_id: str, user: Dict = Depends(get_current_user)):
+    """
+    获取知识库文档处理进度
+
+    返回该知识库下所有正在处理中的文档的进度信息
+    """
+    pool = config.pool
+
+    # 获取处理中的文档列表及其关联的任务进度
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            # 查询处理中的文档及其任务进度
+            await cur.execute("""
+                SELECT
+                    d.id as doc_id,
+                    d.filename,
+                    d.status as doc_status,
+                    d.chunk_count,
+                    t.id as task_id,
+                    t.status as task_status,
+                    t.progress,
+                    t.message,
+                    t.updated_at
+                FROM documents d
+                LEFT JOIN task_queue t ON t.payload->>'doc_id' = d.id
+                WHERE d.kb_id = %s AND d.status = 'processing'
+                ORDER BY d.created_at DESC
+            """, (kb_id,))
+            rows = await cur.fetchall()
+
+    if not rows:
+        return {
+            "kb_id": kb_id,
+            "processing_count": 0,
+            "documents": [],
+            "overall_progress": 0
+        }
+
+    documents = []
+    total_progress = 0
+    valid_progress_count = 0
+
+    for row in rows:
+        doc_info = {
+            "doc_id": row['doc_id'],
+            "filename": row['filename'],
+            "status": row['doc_status'],
+            "chunk_count": row['chunk_count'],
+            "task_id": row['task_id'],
+            "task_status": row['task_status'],
+            "progress": row['progress'] or 0,
+            "message": row['message'] or '准备处理...'
+        }
+        documents.append(doc_info)
+
+        # 计算平均进度（只计算有进度的文档）
+        if row['progress'] is not None:
+            total_progress += row['progress']
+            valid_progress_count += 1
+
+    overall = round(total_progress / valid_progress_count, 1) if valid_progress_count > 0 else 0
+
+    return {
+        "kb_id": kb_id,
+        "processing_count": len(documents),
+        "documents": documents,
+        "overall_progress": overall
+    }
+
+
 @router.post("")
 @audit_log()
 async def create_knowledge_base(request: CreateKnowledgeBaseRequest, user: Dict = Depends(get_current_user)):
@@ -183,13 +262,16 @@ async def create_knowledge_base(request: CreateKnowledgeBaseRequest, user: Dict 
 
     pool = config.pool
 
+    # embedding_model 默认从 config 读取实际部署的模型名
+    embedding_model = request.embedding_model or getattr(config, 'VLLM_EMBEDDING_MODEL', 'embedding')
+
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""
                 INSERT INTO knowledge_bases (id, name, description, embedding_model, chunk_size, chunk_overlap, owner_id, created_at, updated_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 RETURNING *
-            """, (kb_id, request.name, request.description, request.embedding_model,
+            """, (kb_id, request.name, request.description, embedding_model,
                   request.chunk_size, request.chunk_overlap, user.get('user_id')))
             new_kb = await cur.fetchone()
             await conn.commit()

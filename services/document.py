@@ -86,14 +86,28 @@ class DocumentProcessor:
         chunk_overlap: int = 50,
         incremental: bool = False,
         vector_store_type: str = 'pgvector',
-        vector_store_instance=None
+        vector_store_instance=None,
+        on_progress=None
     ) -> Dict[str, Any]:
-        """处理文档文件"""
+        """处理文档文件
+
+        Args:
+            on_progress: 可选进度回调 async(progress: float, message: str) -> None
+                         progress 范围 0-100
+        """
+
+        async def _report(progress: float, message: str):
+            if on_progress:
+                try:
+                    await on_progress(progress, message)
+                except Exception:
+                    pass
 
         # 获取文件扩展名
         ext = Path(filename).suffix.lower()
 
         # 根据文件类型读取内容
+        await _report(5, "正在读取文件...")
         try:
             raw_content = await self._read_file(file_path, ext, doc_id)
         except Exception as e:
@@ -120,10 +134,14 @@ class DocumentProcessor:
                         return {"status": "unchanged", "message": "文档未变更，无需更新"}
 
         # 解析内容
+        await _report(10, "正在解析文档内容...")
         content = self._parse_content(raw_content, ext)
 
         # 智能分块
+        await _report(15, "正在进行智能分块...")
         chunks = self._chunk_content(content, chunk_size, chunk_overlap)
+
+        await _report(20, f"分块完成，共 {len(chunks)} 个分块，正在保存...")
 
         # 处理数据库事务 - 第一阶段：保存分块到数据库
         chunk_ids = []
@@ -154,10 +172,20 @@ class DocumentProcessor:
 
             await conn.commit()
 
-        # 生成向量嵌入
-        embeddings = await embedding_service.generate_batch(chunks)
+        # 生成向量嵌入 - 逐个生成并报告细粒度进度
+        # embedding 阶段占总进度的 25% ~ 85%（共 60%）
+        await _report(25, f"开始生成向量嵌入 (0/{len(chunks)})...")
+        embeddings = []
+        total_chunks = len(chunks)
+        for i, text in enumerate(chunks):
+            embedding = await embedding_service.generate(text)
+            embeddings.append(embedding)
+            # 25% ~ 85% 区间内线性分布
+            embed_progress = 25 + (i + 1) / total_chunks * 60
+            await _report(embed_progress, f"正在生成向量嵌入 ({i + 1}/{total_chunks})...")
 
         # 根据向量存储类型存储向量
+        await _report(87, "正在存储向量数据...")
         valid_embeddings = [(chunk_id, emb) for chunk_id, emb in zip(chunk_ids, embeddings) if emb]
 
         if vector_store_type == 'milvus' and vector_store_instance:
@@ -196,6 +224,7 @@ class DocumentProcessor:
                     else:
                         logger.warning(f"向量嵌入生成失败，文档将保存但不包含向量数据")
 
+        await _report(100, f"文档处理完成，共 {len(chunks)} 个分块")
         return {
             "status": "success",
             "doc_id": doc_id,
