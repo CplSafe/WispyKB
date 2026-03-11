@@ -1,0 +1,51 @@
+# WispyKB 后端实际依赖（根据代码导入分析）
+
+# Web 框架
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+
+# 数据验证
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# 数据库 (PostgreSQL + pgvector)
+psycopg[binary]>=3.1.0
+psycopg-pool>=3.1.0
+pgvector>=0.2.0
+
+# Redis
+redis>=5.0.0
+hiredis>=2.2.0
+
+# 认证与安全
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0
+
+# HTTP 客户端
+httpx>=0.25.0
+
+# 向量数据库（可选）
+pymilvus>=2.3.0
+
+# 文档解析
+python-docx>=1.0.0
+PyPDF2>=3.0.0
+pypdf>=3.0.0
+openpyxl>=3.1.0
+python-magic>=0.4.27
+Pillow>=10.0.0
+
+# LLM 相关
+openai>=1.0.0
+
+# 文本处理
+jieba>=0.42.0
+
+# 工具
+python-dotenv>=1.0.0
+orjson>=3.9.0
+
+# CORS
+starlette>=0.27.0

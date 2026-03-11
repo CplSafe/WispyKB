@@ -16,6 +16,7 @@ class EmbeddingProvider(str, Enum):
     """Embedding 服务提供商"""
     OLLAMA = "ollama"
     XINFERENCE = "xinference"
+    VLLM = "vllm"  # 添加 vLLM 支持
 
 
 class EmbeddingService:
@@ -39,8 +40,8 @@ class EmbeddingService:
 
         Args:
             model: 模型名称
-            base_url: Ollama 服务地址
-            provider: 服务提供商 (ollama/xinference)
+            base_url: 服务地址
+            provider: 服务提供商 (ollama/xinference/vllm)
             xinference_base_url: Xinference 服务地址（如果使用 Xinference）
         """
         self.model = model
@@ -54,10 +55,40 @@ class EmbeddingService:
             logger.warning("输入文本为空，返回空向量")
             return []
 
-        if self.provider == EmbeddingProvider.XINFERENCE:
+        if self.provider == EmbeddingProvider.VLLM:
+            return await self._generate_vllm(text)
+        elif self.provider == EmbeddingProvider.XINFERENCE:
             return await self._generate_xinference(text)
         else:
             return await self._generate_ollama(text)
+
+    async def _generate_vllm(self, text: str) -> List[float]:
+        """使用 vLLM (OpenAI 兼容 API) 生成向量嵌入"""
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/embeddings",
+                    json={
+                        "model": self.model,
+                        "input": text
+                    }
+                )
+                response.raise_for_status()
+                data = response.json()
+                # OpenAI 格式: {"data": [{"embedding": [...]}]}
+                results = data.get("data", [])
+                if results and len(results) > 0:
+                    embedding = results[0].get("embedding", [])
+                    if embedding:
+                        logger.debug(f"vLLM Embedding 成功: 维度={len(embedding)}")
+                    return embedding
+                return []
+        except httpx.HTTPStatusError as e:
+            logger.error(f"vLLM Embedding 失败: {e.response.status_code} - {e.response.text}")
+            return []
+        except Exception as e:
+            logger.error(f"vLLM Embedding 请求失败: {e}")
+            return []
 
     async def _generate_ollama(self, text: str) -> List[float]:
         """使用 Ollama 生成向量嵌入"""

@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:14
+    container_name: wispykb-postgres
+    environment:
+      POSTGRES_DB: wispykb
+      POSTGRES_USER: wispykb_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wispykb_password_change_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: wispykb-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  # 后端 API（使用 host 网络模式访问 vLLM）
+  backend:
+    build:
+      context: ./ai-kb-service
+      dockerfile: ../../deployment/backend.Dockerfile
+    container_name: wispykb-backend
+    network_mode: host  # 使用宿主机网络，可以直接访问 localhost:8000
+    environment:
+      - DATABASE_URL=postgresql://wispykb_user:${POSTGRES_PASSWORD:-wispykb_password_change_me}@localhost:5432/wispykb
+      - REDIS_URL=redis://localhost:6379/0
+      - JWT_SECRET=${JWT_SECRET:-change-this-secret-key-in-production}
+      - DEBUG=false
+      - ENVIRONMENT=production
+      - CORS_ORIGINS=${CORS_ORIGINS:-["http://localhost:8081"]}
+      - LLM_ENGINE=${LLM_ENGINE:-vllm}
+      - VLLM_ENABLED=${VLLM_ENABLED:-true}
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://localhost:8000}
+      - VLLM_CHAT_MODEL=${VLLM_CHAT_MODEL:-deepseek-chat}
+      - EMBEDDING_ENGINE=${EMBEDDING_ENGINE:-api}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-http://localhost:8003}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-qwen3-embedding}
+      - RERANK_ENGINE=${RERANK_ENGINE:-api}
+      - RERANK_BASE_URL=${RERANK_BASE_URL:-http://localhost:8003}
+      - RERANK_MODEL=${RERANK_MODEL:-qwen3-reranker}
+      - VECTOR_STORE_TYPE=${VECTOR_STORE_TYPE:-pgvector}
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

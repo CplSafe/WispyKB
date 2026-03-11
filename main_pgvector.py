@@ -27,6 +27,13 @@ from core.config import (
     OLLAMA_BASE_URL,
     OLLAMA_EMBEDDING_MODEL,
     RERANK_MODEL,
+    VLLM_ENABLED,
+    VLLM_EMBEDDING_ENABLED,
+    VLLM_RERANK_ENABLED,
+    VLLM_EMBEDDING_BASE_URL,
+    VLLM_RERANK_BASE_URL,
+    VLLM_EMBEDDING_MODEL,
+    VLLM_RERANK_MODEL,
     VECTOR_STORE_TYPE,
     VECTOR_STORE_CONFIG,
     MILVUS_CONFIG,
@@ -143,29 +150,18 @@ app.mount("/static/files", StaticFiles(directory=str(UPLOAD_DIR)), name="files")
 
 # CORS 中间件 - 安全配置
 import os
-from core.config import CORS_ORIGINS
+from core.config import CORS_ORIGINS, ENVIRONMENT
 
-# 从环境变量读取 CORS 配置，如果未设置则使用开发默认值
-cors_origins_config = os.getenv("CORS_ORIGINS", '["http://localhost:3000", "http://localhost:8000"]')
+# 直接使用 config.py 中的 CORS_ORIGINS 配置
+cors_origins = CORS_ORIGINS
 
-try:
-    import json
-    cors_origins = json.loads(cors_origins_config)
+# 生产环境安全检查
+if ENVIRONMENT == "production" and "*" in cors_origins:
+    logger.error("🚨 严重安全问题: CORS 配置包含通配符 '*'，生产环境不允许！")
+    logger.error("请修改 core/config.py 中的 CORS_ORIGINS 为具体域名")
+    cors_origins = []
 
-    # 生产环境安全检查：如果配置了通配符，记录警告
-    environment = os.getenv("ENVIRONMENT", "development")
-    if environment == "production" and "*" in cors_origins:
-        logger.error("🚨 严重安全问题: CORS 配置包含通配符 '*'，生产环境不允许！")
-        logger.error("请通过环境变量 CORS_ORIGINS 设置具体的域名白名单")
-        # 在生产环境中，如果配置了通配符，回退到空列表（拒绝所有请求）
-        cors_origins = []
-
-    logger.info(f"CORS 配置: {cors_origins}")
-
-except json.JSONDecodeError as e:
-    logger.error(f"CORS_ORIGINS 配置格式错误: {e}")
-    logger.error("使用默认值: ['http://localhost:3000', 'http://localhost:8000']")
-    cors_origins = ["http://localhost:3000", "http://localhost:8000"]
+logger.info(f"CORS 配置: {cors_origins}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -289,10 +285,32 @@ async def startup_event():
         mcp_server = None
 
     # 初始化嵌入服务
-    embedding_service = EmbeddingService(OLLAMA_EMBEDDING_MODEL, OLLAMA_BASE_URL)
+    # 优先使用 vLLM Embedding，否则使用 Ollama
+    if VLLM_EMBEDDING_ENABLED:
+        from services.embedding import EmbeddingProvider
+        embedding_service = EmbeddingService(
+            VLLM_EMBEDDING_MODEL,
+            VLLM_EMBEDDING_BASE_URL,
+            provider=EmbeddingProvider.VLLM
+        )
+        logger.info(f"使用 vLLM Embedding: {VLLM_EMBEDDING_MODEL} @ {VLLM_EMBEDDING_BASE_URL}")
+    else:
+        embedding_service = EmbeddingService(OLLAMA_EMBEDDING_MODEL, OLLAMA_BASE_URL)
+        logger.info(f"使用 Ollama Embedding: {OLLAMA_EMBEDDING_MODEL} @ {OLLAMA_BASE_URL}")
 
     # 初始化 Rerank 服务
-    rerank_service = RerankService(RERANK_MODEL, OLLAMA_BASE_URL)
+    # 优先使用 vLLM Reranker，否则使用 Ollama
+    if VLLM_RERANK_ENABLED:
+        from services.rerank import RerankProvider
+        rerank_service = RerankService(
+            VLLM_RERANK_MODEL,
+            VLLM_RERANK_BASE_URL,
+            provider=RerankProvider.VLLM
+        )
+        logger.info(f"使用 vLLM Reranker: {VLLM_RERANK_MODEL} @ {VLLM_RERANK_BASE_URL}")
+    else:
+        rerank_service = RerankService(RERANK_MODEL, OLLAMA_BASE_URL)
+        logger.info(f"使用 Ollama Reranker: {RERANK_MODEL} @ {OLLAMA_BASE_URL}")
 
     # 初始化文档处理器（自动检测可用库）
     document_processor = DocumentProcessor()

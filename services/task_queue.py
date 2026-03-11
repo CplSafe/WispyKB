@@ -180,3 +180,45 @@ class TaskQueue:
 
                 await cur.execute(query, params)
                 return await cur.fetchall()
+
+    async def cancel_task(self, task_id: str) -> bool:
+        """
+        取消任务
+        
+        Args:
+            task_id: 任务 ID
+            
+        Returns:
+            是否成功取消
+        """
+        pool = self.pool_ref
+        if not pool:
+            logger.warning("数据库连接池不可用，无法取消任务")
+            return False
+        
+        try:
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    # 只能取消 pending 或 processing 状态的任务
+                    await cur.execute("""
+                        UPDATE async_tasks
+                        SET status = 'cancelled',
+                            message = '任务已取消',
+                            updated_at = NOW()
+                        WHERE id = %s
+                          AND status IN ('pending', 'processing')
+                    """, (task_id,))
+                    
+                    rows_affected = cur.rowcount
+                    await conn.commit()
+                    
+                    if rows_affected > 0:
+                        logger.info(f"任务 {task_id} 已取消")
+                        return True
+                    else:
+                        logger.warning(f"无法取消任务 {task_id}，状态不允许或任务不存在")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"取消任务失败: {e}")
+            return False

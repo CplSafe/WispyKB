@@ -16,6 +16,7 @@ class RerankProvider(str, Enum):
     """Rerank 服务提供商"""
     OLLAMA = "ollama"
     XINFERENCE = "xinference"
+    VLLM = "vllm"  # 添加 vLLM 支持
 
 
 class RerankService:
@@ -49,8 +50,8 @@ class RerankService:
 
         Args:
             model: Rerank 模型名称
-            base_url: Ollama 服务地址
-            provider: 服务提供商 (ollama/xinference)
+            base_url: 服务地址
+            provider: 服务提供商 (ollama/xinference/vllm)
             xinference_base_url: Xinference 服务地址（如果使用 Xinference）
         """
         self.model = model
@@ -101,10 +102,64 @@ class RerankService:
         if not unique_texts:
             return documents
 
-        if self.provider == RerankProvider.XINFERENCE:
+        if self.provider == RerankProvider.VLLM:
+            return await self._rerank_vllm(query, unique_texts, unique_indices, documents, top_k)
+        elif self.provider == RerankProvider.XINFERENCE:
             return await self._rerank_xinference(query, unique_texts, unique_indices, documents, top_k)
         else:
             return await self._rerank_ollama(query, unique_texts, unique_indices, documents, top_k)
+
+    async def _rerank_vllm(
+        self,
+        query: str,
+        unique_texts: List[str],
+        unique_indices: List[int],
+        documents: List[Dict[str, Any]],
+        top_k: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """使用 vLLM (OpenAI 兼容 API) 进行 Rerank"""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                payload = {
+                    "model": self.model,
+                    "query": query,
+                    "documents": unique_texts,
+                    "top_n": top_k if top_k else len(unique_texts)
+                }
+
+                response = await client.post(
+                    f"{self.base_url}/v1/rerank",
+                    json=payload,
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                # OpenAI 兼容格式: {"results": [{"index": 0, "relevance_score": 0.95, ...}]}
+                results = data.get("results", [])
+
+                if not results:
+                    logger.warning(f"vLLM Rerank 返回空结果: {data}")
+                    return documents
+
+                reranked_docs = []
+                for r in results[:top_k] if top_k else results:
+                    original_index = unique_indices[r['index']]
+                    doc = documents[original_index].copy()
+                    doc['rerank_score'] = r.get('relevance_score', r.get('score', 0.0))
+                    doc['original_index'] = original_index
+                    reranked_docs.append(doc)
+
+                logger.info(f"vLLM Rerank 完成: 查询='{query[:30]}...', 候选={len(documents)}, 返回={len(reranked_docs)}")
+                return reranked_docs
+
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"vLLM Rerank 不可用: {e.response.status_code}")
+            self.enabled = False
+            return documents
+        except Exception as e:
+            logger.error(f"vLLM Rerank 失败: {e}")
+            return documents
 
     async def _rerank_ollama(
         self,

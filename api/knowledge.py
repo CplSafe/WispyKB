@@ -8,7 +8,7 @@ import httpx
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, List, Any
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
 from pydantic import BaseModel
 from psycopg.rows import dict_row
 from core import config, audit_log, audit_log_with_changes
@@ -85,7 +85,11 @@ async def list_knowledge_bases(user: Dict = Depends(get_current_user)):
     - 超级管理员：查看所有知识库
     - 工作区管理员：查看自己的知识库
     - 普通用户：查看自己的知识库 + 公开的知识库
+
+    添加 Cache-Control 头避免前端缓存
     """
+    from fastapi import Response
+
     user_id = user.get('user_id') if user else None
     user_role = user.get('role') if user else 'member'
 
@@ -134,7 +138,19 @@ async def list_knowledge_bases(user: Dict = Depends(get_current_user)):
             """, params)
             rows = await cur.fetchall()
 
-    return {"knowledge_bases": rows}
+    # 返回时添加不缓存头
+    import json
+    from fastapi import Response
+
+    return Response(
+        content=json.dumps({"knowledge_bases": rows}),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
 
 
 @router.get("/{kb_id}")

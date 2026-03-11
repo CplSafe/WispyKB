@@ -51,10 +51,19 @@ async def get_db_connection() -> AsyncGenerator:
 async def setup_database():
     """初始化数据库表结构"""
     global pool
+    from .config import VECTOR_STORE_TYPE
+
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            # 启用 pgvector 扩展
-            await cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            # 只有使用 pgvector 时才启用扩展
+            if VECTOR_STORE_TYPE == "pgvector":
+                try:
+                    await cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                    logger.info("pgvector 扩展已启用")
+                except Exception as e:
+                    logger.warning(f"pgvector 扩展创建失败: {e}")
+            else:
+                logger.info(f"使用 {VECTOR_STORE_TYPE} 向量存储，跳过 pgvector 扩展")
 
             # 用户表
             await cur.execute("""
@@ -180,24 +189,36 @@ async def setup_database():
                 )
             """)
 
-            # 分块表 (带 pgvector)
-            await cur.execute("""
-                CREATE TABLE IF NOT EXISTS chunks (
-                    id TEXT PRIMARY KEY,
-                    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-                    chunk_index INTEGER NOT NULL,
-                    content TEXT NOT NULL,
-                    embedding vector(768),
-                    metadata JSONB,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-
-            # HNSW 索引 (专业级向量搜索)
-            await cur.execute("""
-                CREATE INDEX IF NOT EXISTS chunks_embedding_idx
-                ON chunks USING hnsw (embedding vector_cosine_ops)
-            """)
+            # 分块表 (根据向量存储类型决定是否包含 vector 列)
+            if VECTOR_STORE_TYPE == "pgvector":
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS chunks (
+                        id TEXT PRIMARY KEY,
+                        doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                        chunk_index INTEGER NOT NULL,
+                        content TEXT NOT NULL,
+                        embedding vector(768),
+                        metadata JSONB,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                # HNSW 索引
+                await cur.execute("""
+                    CREATE INDEX IF NOT EXISTS chunks_embedding_idx
+                    ON chunks USING hnsw (embedding vector_cosine_ops)
+                """)
+            else:
+                # 使用 Milvus 时不需要 embedding 列
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS chunks (
+                        id TEXT PRIMARY KEY,
+                        doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                        chunk_index INTEGER NOT NULL,
+                        content TEXT NOT NULL,
+                        metadata JSONB,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
 
             # 应用表
             await cur.execute("""

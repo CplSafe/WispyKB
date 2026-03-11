@@ -16,7 +16,9 @@ from typing import Dict, Optional
 from core import config, audit_log, audit_log_with_changes
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
+import asyncio
 from PIL import Image, ImageDraw, ImageFont
 from psycopg.rows import dict_row
 
@@ -711,3 +713,261 @@ async def get_model_recommendations(user: Dict = Depends(get_current_user)):
             }
         }
     }
+
+
+# ==================== 任务状态查询 API ====================
+
+class TaskListRequest(BaseModel):
+    """任务列表查询请求"""
+    status: Optional[str] = None
+    limit: int = 50
+    offset: int = 0
+
+
+@router.get("/tasks/{task_id}")
+async def get_task_status(
+    task_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """
+    查询单个任务状态
+    
+    返回任务的当前进度和状态信息
+    """
+    main_pgvector = get_main_module()
+    task_queue = getattr(main_pgvector, 'task_queue', None)
+    
+    if not task_queue:
+        raise HTTPException(
+            status_code=503,
+            detail="任务队列服务未启用"
+        )
+    
+    task = await task_queue.get_task(task_id)
+    
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail=f"任务 {task_id} 不存在"
+        )
+    
+    return {
+        "task_id": task.get('task_id'),
+        "status": task.get('status'),
+        "progress": task.get('progress', 0),
+        "message": task.get('message', ''),
+        "result": task.get('result'),
+        "error": task.get('error'),
+        "created_at": task.get('created_at'),
+        "updated_at": task.get('updated_at'),
+    }
+
+
+@router.get("/tasks")
+async def list_tasks(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    user: dict = Depends(get_current_user)
+):
+    """
+    查询任务列表
+    
+    支持按状态筛选和分页
+    """
+    main_pgvector = get_main_module()
+    task_queue = getattr(main_pgvector, 'task_queue', None)
+    
+    if not task_queue:
+        raise HTTPException(
+            status_code=503,
+            detail="任务队列服务未启用"
+        )
+    
+    tasks = await task_queue.list_tasks(
+        status=status,
+        limit=limit,
+        offset=offset
+    )
+    
+    return {
+        "tasks": tasks,
+        "count": len(tasks),
+        "offset": offset,
+        "limit": limit
+    }
+
+
+@router.get("/tasks/{task_id}/stream")
+async def stream_task_status(task_id: str):
+    """
+    SSE 实时推送任务状态
+    
+    使用 Server-Sent Events 实时推送任务进度，
+    前端使用 EventSource 接收更新
+    
+    前端示例:
+    ```javascript
+    const eventSource = new EventSource(`/api/v1/system/tasks/${taskId}/stream`);
+    eventSource.addEventListener('progress', (e) => {
+        const data = JSON.parse(e.data);
+        console.log('进度:', data.progress);
+    });
+    eventSource.addEventListener('completed', (e) => {
+        console.log('完成');
+        eventSource.close();
+    });
+    ```
+    """
+    main_pgvector = get_main_module()
+    task_queue = getattr(main_pgvector, 'task_queue', None)
+    
+    if not task_queue:
+        raise HTTPException(
+            status_code=503,
+            detail="任务队列服务未启用"
+        )
+    
+    # 验证任务是否存在
+    task = await task_queue.get_task(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail=f"任务 {task_id} 不存在"
+        )
+    
+    async def event_generator():
+        """SSE 事件生成器"""
+        try:
+            last_progress = -1
+            last_status = None
+            
+            while True:
+                # 获取最新任务状态
+                current_task = await task_queue.get_task(task_id)
+                
+                if not current_task:
+                    yield {
+                        "event": "error",
+                        "data": {"message": "任务不存在", "task_id": task_id}
+                    }
+                    break
+                
+                current_progress = current_task.get('progress', 0)
+                current_status = current_task.get('status')
+                
+                # 只在进度或状态变化时发送
+                if current_progress != last_progress or current_status != last_status:
+                    yield {
+                        "event": "progress",
+                        "data": {
+                            "task_id": current_task.get('task_id'),
+                            "status": current_status,
+                            "progress": current_progress,
+                            "message": current_task.get('message', ''),
+                            "result": current_task.get('result'),
+                            "error": current_task.get('error')
+                        }
+                    }
+                    last_progress = current_progress
+                    last_status = current_status
+                
+                # 任务完成或失败
+                if current_status in ['completed', 'failed', 'cancelled']:
+                    yield {
+                        "event": current_status,
+                        "data": {
+                            "task_id": current_task.get('task_id'),
+                            "status": current_status,
+                            "progress": 100 if current_status == 'completed' else current_progress,
+                            "message": current_task.get('message', ''),
+                            "result": current_task.get('result'),
+                            "error": current_task.get('error')
+                        }
+                    }
+                    logger.info(f"任务 {task_id} {current_status}，SSE 连接关闭")
+                    break
+                
+                # 每秒检查一次
+                await asyncio.sleep(1)
+                
+        except asyncio.CancelledError:
+            logger.info(f"SSE 连接关闭: task_id={task_id}")
+        except Exception as e:
+            logger.error(f"SSE 推送错误: {e}")
+            yield {
+                "event": "error",
+                "data": {"message": f"推送错误: {str(e)}", "task_id": task_id}
+            }
+    
+    return EventSourceResponse(event_generator())
+
+
+@router.delete("/tasks/{task_id}")
+async def cancel_task(
+    task_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """
+    取消任务
+    
+    只能取消 pending 或 processing 状态的任务
+    """
+    main_pgvector = get_main_module()
+    task_queue = getattr(main_pgvector, 'task_queue', None)
+    
+    if not task_queue:
+        raise HTTPException(
+            status_code=503,
+            detail="任务队列服务未启用"
+        )
+    
+    # 验证任务权限
+    task = await task_queue.get_task(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail=f"任务 {task_id} 不存在"
+        )
+    
+    # TODO: 添加用户权限验证
+    # if task.get('user_id') != user.get('user_id') and user.get('role') != 'super_admin':
+    #     raise HTTPException(status_code=403, detail="无权限取消此任务")
+    
+    success = await task_queue.cancel_task(task_id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无法取消任务 {task_id}，可能已完成或不存在"
+        )
+    
+    logger.info(f"任务 {task_id} 已被取消")
+    
+    return {
+        "task_id": task_id,
+        "status": "cancelled",
+        "message": "任务已取消"
+    }
+
+
+def get_main_module():
+    """获取 main_pgvector 模块"""
+    import sys
+    import importlib
+    
+    # 优先使用 __main__（直接运行时）
+    _main = sys.modules.get('__main__')
+    if _main and hasattr(_main, 'task_queue'):
+        return _main
+    
+    # 否则尝试 main_pgvector
+    _main = sys.modules.get('main_pgvector')
+    if _main:
+        return _main
+    
+    # 最后尝试导入
+    try:
+        return importlib.import_module('main_pgvector')
+    except ImportError:
+        return None
