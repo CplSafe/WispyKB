@@ -210,7 +210,7 @@ async def _process_document_with_task(task_id: str, doc_id: str, kb_id: str, fil
     # 进度回调函数 - 将文档处理进度同步到任务队列
     async def on_progress(progress: float, message: str):
         if task_queue:
-            await task_queue.update_progress(task_id, int(progress), message)
+            await task_queue.update_progress(task_id, int(progress), "processing", message)
 
     try:
         # 处理文档

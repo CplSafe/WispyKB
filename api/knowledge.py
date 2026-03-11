@@ -205,7 +205,7 @@ async def get_kb_processing_progress(kb_id: str, user: Dict = Depends(get_curren
                     t.id as task_id,
                     t.status as task_status,
                     t.progress,
-                    t.message,
+                    t.metadata->>'message' as message,
                     t.updated_at
                 FROM documents d
                 LEFT JOIN async_tasks t ON t.metadata->>'doc_id' = d.id

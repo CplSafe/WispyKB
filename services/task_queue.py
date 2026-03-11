@@ -62,15 +62,24 @@ class TaskQueue:
         logger.info(f"任务已创建: {task_id}, 类型: {task_type.value if hasattr(task_type, 'value') else task_type}")
         return task_id
 
-    async def update_progress(self, task_id: str, progress: float, status: str = "processing"):
+    async def update_progress(self, task_id: str, progress: float, status: str = "processing", message: str = None):
         """更新任务进度"""
         async with self.pool_ref.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("""
-                    UPDATE async_tasks
-                    SET progress = %s, status = %s, updated_at = NOW()
-                    WHERE id = %s
-                """, (progress, status, task_id))
+                if message:
+                    # 同时更新 metadata 中的 message
+                    await cur.execute("""
+                        UPDATE async_tasks
+                        SET progress = %s, status = %s, metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{message}', %s::jsonb),
+                            updated_at = NOW()
+                        WHERE id = %s
+                    """, (progress, status, f'"{message}"', task_id))
+                else:
+                    await cur.execute("""
+                        UPDATE async_tasks
+                        SET progress = %s, status = %s, updated_at = NOW()
+                        WHERE id = %s
+                    """, (progress, status, task_id))
                 await conn.commit()
 
         # 更新 Redis 缓存
@@ -78,6 +87,8 @@ class TaskQueue:
         if cached:
             cached['progress'] = progress
             cached['status'] = status
+            if message:
+                cached['message'] = message
             await self.cache.set(f"task:{task_id}", cached, ttl=3600)
 
     async def complete_task(self, task_id: str, result: Dict[str, Any]):
