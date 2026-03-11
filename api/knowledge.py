@@ -138,12 +138,17 @@ async def list_knowledge_bases(user: Dict = Depends(get_current_user)):
             """, params)
             rows = await cur.fetchall()
 
-    # 返回时添加不缓存头
     import json
+    from datetime import datetime, date
     from fastapi import Response
 
+    def _default(obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     return Response(
-        content=json.dumps({"knowledge_bases": rows}),
+        content=json.dumps({"knowledge_bases": rows}, default=_default, ensure_ascii=False),
         media_type="application/json",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
