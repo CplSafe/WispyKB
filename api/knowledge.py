@@ -199,7 +199,7 @@ async def get_kb_processing_progress(kb_id: str, user: Dict = Depends(get_curren
             await cur.execute("""
                 SELECT
                     d.id as doc_id,
-                    d.filename,
+                    d.name as filename,
                     d.status as doc_status,
                     d.chunk_count,
                     t.id as task_id,
@@ -208,7 +208,7 @@ async def get_kb_processing_progress(kb_id: str, user: Dict = Depends(get_curren
                     t.message,
                     t.updated_at
                 FROM documents d
-                LEFT JOIN task_queue t ON t.payload->>'doc_id' = d.id
+                LEFT JOIN async_tasks t ON t.metadata->>'doc_id' = d.id
                 WHERE d.kb_id = %s AND d.status = 'processing'
                 ORDER BY d.created_at DESC
             """, (kb_id,))
