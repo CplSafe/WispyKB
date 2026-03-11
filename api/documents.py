@@ -711,6 +711,8 @@ async def assign_documents_to_kb(
     """
 
     pool = config.pool
+    main_pgvector = get_main_module()
+    task_queue = getattr(main_pgvector, 'task_queue', None)
 
     doc_ids = request.get("doc_ids", [])
     kb_id = request.get("kb_id")
@@ -748,11 +750,21 @@ async def assign_documents_to_kb(
                     """, (kb_id, doc_id))
                     await conn.commit()
 
-            # 后台处理文档
+            # 创建任务并后台处理文档
+            if task_queue:
+                # 创建任务，metadata 中包含 doc_id 用于查询关联
+                task_id = await task_queue.create_task(
+                    "document_assign",
+                    {"doc_id": doc_id, "kb_id": kb_id},
+                    user.get('id')
+                )
+            else:
+                task_id = f"assign-{doc_id}"
+
             if background_tasks:
                 background_tasks.add_task(
                     _process_document_with_task,
-                    f"assign-{doc_id}",
+                    task_id,
                     doc_id,
                     kb_id,
                     doc['file_path'],
@@ -760,7 +772,7 @@ async def assign_documents_to_kb(
                     kb
                 )
 
-            results.append({"doc_id": doc_id, "status": "success", "message": "分配成功"})
+            results.append({"doc_id": doc_id, "status": "success", "message": "分配成功", "task_id": task_id})
 
         except Exception as e:
             logger.error(f"分配文档失败: {doc_id}, 错误: {e}")
