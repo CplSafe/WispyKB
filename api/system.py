@@ -4,6 +4,7 @@
 """
 import base64
 import hashlib
+import json
 import logging
 import os
 import random
@@ -841,63 +842,63 @@ async def stream_task_status(task_id: str):
         try:
             last_progress = -1
             last_status = None
-            
+
             while True:
                 # 获取最新任务状态
                 current_task = await task_queue.get_task(task_id)
-                
+
                 if not current_task:
                     yield {
                         "event": "error",
-                        "data": {"message": "任务不存在", "task_id": task_id}
+                        "data": json.dumps({"message": "任务不存在", "task_id": task_id})
                     }
                     break
-                
+
                 current_progress = current_task.get('progress', 0)
                 current_status = current_task.get('status')
-                
+
                 # 只在进度或状态变化时发送
                 if current_progress != last_progress or current_status != last_status:
                     yield {
                         "event": "progress",
-                        "data": {
-                            "task_id": current_task.get('task_id'),
+                        "data": json.dumps({
+                            "task_id": task_id,
                             "status": current_status,
                             "progress": current_progress,
                             "message": current_task.get('message', ''),
                             "result": current_task.get('result'),
                             "error": current_task.get('error')
-                        }
+                        })
                     }
                     last_progress = current_progress
                     last_status = current_status
-                
+
                 # 任务完成或失败
                 if current_status in ['completed', 'failed', 'cancelled']:
                     yield {
                         "event": current_status,
-                        "data": {
-                            "task_id": current_task.get('task_id'),
+                        "data": json.dumps({
+                            "task_id": task_id,
                             "status": current_status,
                             "progress": 100 if current_status == 'completed' else current_progress,
                             "message": current_task.get('message', ''),
                             "result": current_task.get('result'),
                             "error": current_task.get('error')
-                        }
+                        })
                     }
                     logger.info(f"任务 {task_id} {current_status}，SSE 连接关闭")
                     break
-                
+
                 # 每秒检查一次
                 await asyncio.sleep(1)
-                
+
         except asyncio.CancelledError:
             logger.info(f"SSE 连接关闭: task_id={task_id}")
         except Exception as e:
             logger.error(f"SSE 推送错误: {e}")
             yield {
                 "event": "error",
-                "data": {"message": f"推送错误: {str(e)}", "task_id": task_id}
+                "data": json.dumps({"message": f"推送错误: {str(e)}", "task_id": task_id})
             }
     
     return EventSourceResponse(event_generator())
