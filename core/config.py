@@ -85,6 +85,9 @@ STORAGE_DIR = os.getenv("STORAGE_DIR", "./storage")
 UPLOAD_DIR = Path(STORAGE_DIR) / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# 静态文件访问 URL（用于 Excel 图片等资源的 URL 前缀）
+STATIC_URL = os.getenv("STATIC_URL", "/static/files")
+
 # ==================== CORS 配置 ====================
 
 CORS_ORIGINS = ["http://localhost:8888"]  # 修改为实际前端域名

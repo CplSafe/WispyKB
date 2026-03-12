@@ -230,6 +230,21 @@ async def _process_document_with_task(task_id: str, doc_id: str, kb_id: str, fil
                 on_progress=on_progress
             )
 
+            # 检查处理结果
+            if result.get('status') == 'failed':
+                error_msg = result.get('error', '文档处理失败')
+                logger.error(f"文档处理失败: {doc_id}, 错误: {error_msg}")
+                if task_queue:
+                    await task_queue.fail_task(task_id, error_msg)
+                async with pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("""
+                            UPDATE documents SET status = 'failed', error_message = %s, updated_at = NOW()
+                            WHERE id = %s
+                        """, (error_msg, doc_id))
+                        await conn.commit()
+                return
+
             # 标记任务完成
             if task_queue:
                 await task_queue.complete_task(task_id, {
