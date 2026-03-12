@@ -163,10 +163,10 @@ class DocumentProcessor:
                     chunk_ids.append(chunk_id)
                     chunk_contents.append(chunk_content)  # 保存内容
 
-                # 更新文档
+                # 更新文档（保持 processing 状态，等 embedding 完成后再改为 completed）
                 await cur.execute("""
                     UPDATE documents
-                    SET status = 'completed', chunk_count = %s, content = %s, file_hash = %s, updated_at = NOW()
+                    SET chunk_count = %s, content = %s, file_hash = %s, updated_at = NOW()
                     WHERE id = %s
                 """, (len(chunks), raw_content[:10000], file_hash, doc_id))  # 只存储前10000字符预览
 
@@ -223,6 +223,15 @@ class DocumentProcessor:
                         logger.info(f"向量嵌入生成完成: {len(valid_embeddings)}/{len(chunks)} 个分块")
                     else:
                         logger.warning(f"向量嵌入生成失败，文档将保存但不包含向量数据")
+
+        # 所有步骤完成，更新文档状态为 completed
+        async with pool_ref.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    UPDATE documents SET status = 'completed', updated_at = NOW()
+                    WHERE id = %s
+                """, (doc_id,))
+                await conn.commit()
 
         await _report(100, f"文档处理完成，共 {len(chunks)} 个分块")
         return {
