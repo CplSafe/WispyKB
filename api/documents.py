@@ -213,7 +213,7 @@ async def _process_document_with_task(task_id: str, doc_id: str, kb_id: str, fil
             await task_queue.update_progress(task_id, int(progress), "processing", message)
 
     try:
-        # 处理文档
+        # 处理文档（incremental=False: 首次处理必须完整执行 embedding）
         if document_processor:
             result = await document_processor.process(
                 file_path=file_path,
@@ -224,7 +224,7 @@ async def _process_document_with_task(task_id: str, doc_id: str, kb_id: str, fil
                 embedding_service=embedding_service,
                 chunk_size=kb.get('chunk_size', 512),
                 chunk_overlap=kb.get('chunk_overlap', 50),
-                incremental=True,
+                incremental=False,
                 vector_store_type=VECTOR_STORE_TYPE,
                 vector_store_instance=vector_store_instance,
                 on_progress=on_progress
